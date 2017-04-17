@@ -1,36 +1,26 @@
-/*=====================================================================
- 
- QGroundControl Open Source Ground Control Station
- 
- (c) 2009, 2015 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
- 
- This file is part of the QGROUNDCONTROL project
- 
- QGROUNDCONTROL is free software: you can redistribute it and/or modify
- it under the terms of the GNU General Public License as published by
- the Free Software Foundation, either version 3 of the License, or
- (at your option) any later version.
- 
- QGROUNDCONTROL is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU General Public License for more details.
- 
- You should have received a copy of the GNU General Public License
- along with QGROUNDCONTROL. If not, see <http://www.gnu.org/licenses/>.
- 
- ======================================================================*/
+/****************************************************************************
+ *
+ *   (c) 2009-2016 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
+ *
+ * QGroundControl is licensed according to the terms in the file
+ * COPYING.md in the root of the source code directory.
+ *
+ ****************************************************************************/
+
 
 /// @file
 ///     @author Don Gagne <don@thegagnes.com>
 
 #include "SensorsComponentController.h"
 #include "QGCMAVLink.h"
-#include "UASManager.h"
-#include "QGCMessageBox.h"
+#include "UAS.h"
+#include "QGCApplication.h"
+#include "ParameterManager.h"
 
 #include <QVariant>
 #include <QQmlProperty>
+
+QGC_LOGGING_CATEGORY(SensorsComponentControllerLog, "SensorsComponentControllerLog")
 
 SensorsComponentController::SensorsComponentController(void) :
     _statusLog(NULL),
@@ -41,6 +31,7 @@ SensorsComponentController::SensorsComponentController(void) :
     _airspeedButton(NULL),
     _levelButton(NULL),
     _cancelButton(NULL),
+    _setOrientationsButton(NULL),
     _showOrientationCalArea(false),
     _gyroCalInProgress(false),
     _magCalInProgress(false),
@@ -72,7 +63,11 @@ SensorsComponentController::SensorsComponentController(void) :
     _unknownFirmwareVersion(false),
     _waitingForCancel(false)
 {
+}
 
+bool SensorsComponentController::usingUDPLink(void)
+{
+    return _vehicle->priorityLink()->getLinkConfiguration()->type() == LinkConfiguration::TypeUdp;
 }
 
 /// Appends the specified text to the status log area in the ui
@@ -105,9 +100,38 @@ void SensorsComponentController::_startVisualCalibration(void)
     _accelButton->setEnabled(false);
     _airspeedButton->setEnabled(false);
     _levelButton->setEnabled(false);
+    _setOrientationsButton->setEnabled(false);
     _cancelButton->setEnabled(true);
+
+    _resetInternalState();
     
     _progressBar->setProperty("value", 0);
+}
+
+void SensorsComponentController::_resetInternalState(void)
+{
+    _orientationCalDownSideDone = true;
+    _orientationCalUpsideDownSideDone = true;
+    _orientationCalLeftSideDone = true;
+    _orientationCalRightSideDone = true;
+    _orientationCalTailDownSideDone = true;
+    _orientationCalNoseDownSideDone = true;
+    _orientationCalDownSideInProgress = false;
+    _orientationCalUpsideDownSideInProgress = false;
+    _orientationCalLeftSideInProgress = false;
+    _orientationCalRightSideInProgress = false;
+    _orientationCalNoseDownSideInProgress = false;
+    _orientationCalTailDownSideInProgress = false;
+    _orientationCalDownSideRotate = false;
+    _orientationCalUpsideDownSideRotate = false;
+    _orientationCalLeftSideRotate = false;
+    _orientationCalRightSideRotate = false;
+    _orientationCalNoseDownSideRotate = false;
+    _orientationCalTailDownSideRotate = false;
+
+    emit orientationCalSidesRotateChanged();
+    emit orientationCalSidesDoneChanged();
+    emit orientationCalSidesInProgressChanged();
 }
 
 void SensorsComponentController::_stopCalibration(SensorsComponentController::StopCalibrationCode code)
@@ -119,23 +143,11 @@ void SensorsComponentController::_stopCalibration(SensorsComponentController::St
     _accelButton->setEnabled(true);
     _airspeedButton->setEnabled(true);
     _levelButton->setEnabled(true);
+    _setOrientationsButton->setEnabled(true);
     _cancelButton->setEnabled(false);
     
     if (code == StopCalibrationSuccess) {
-        _orientationCalDownSideDone = true;
-        _orientationCalUpsideDownSideDone = true;
-        _orientationCalLeftSideDone = true;
-        _orientationCalRightSideDone = true;
-        _orientationCalTailDownSideDone = true;
-        _orientationCalNoseDownSideDone = true;
-        _orientationCalDownSideInProgress = false;
-        _orientationCalUpsideDownSideInProgress = false;
-        _orientationCalLeftSideInProgress = false;
-        _orientationCalRightSideInProgress = false;
-        _orientationCalNoseDownSideInProgress = false;
-        _orientationCalTailDownSideInProgress = false;
-        emit orientationCalSidesDoneChanged();
-        emit orientationCalSidesInProgressChanged();
+        _resetInternalState();
         
         _progressBar->setProperty("value", 1);
     } else {
@@ -164,7 +176,7 @@ void SensorsComponentController::_stopCalibration(SensorsComponentController::St
         default:
             // Assume failed
             _hideAllCalAreas();
-            QGCMessageBox::warning("Calibration", "Calibration failed. Calibration log will be displayed.");
+            qgcApp()->showMessage("Calibration failed. Calibration log will be displayed.");
             break;
     }
     
@@ -208,9 +220,7 @@ void SensorsComponentController::_handleUASTextMessage(int uasId, int compId, in
     Q_UNUSED(compId);
     Q_UNUSED(severity);
     
-    UASInterface* uas = _autopilot->uas();
-    Q_ASSERT(uas);
-    if (uasId != uas->getUASID()) {
+    if (uasId != _vehicle->id()) {
         return;
     }
     
@@ -226,6 +236,7 @@ void SensorsComponentController::_handleUASTextMessage(int uasId, int compId, in
     }
 
     _appendStatusLog(text);
+    qCDebug(SensorsComponentControllerLog) << text;
     
     if (_unknownFirmwareVersion) {
         // We don't know how to do visual cal with the version of firwmare
@@ -290,13 +301,25 @@ void SensorsComponentController::_handleUASTextMessage(int uasId, int compId, in
                 _orientationCalTailDownSideVisible = true;
                 _orientationCalNoseDownSideVisible = true;
             } else if (text == "mag") {
+
+                // Work out what the autopilot is configured to
+                int sides = 0;
+
+                if (_vehicle->parameterManager()->parameterExists(FactSystem::defaultComponentId, "CAL_MAG_SIDES")) {
+                    // Read the requested calibration directions off the system
+                    sides = _vehicle->parameterManager()->getParameter(FactSystem::defaultComponentId, "CAL_MAG_SIDES")->rawValue().toFloat();
+                } else {
+                    // There is no valid setting, default to all six sides
+                    sides = (1 << 5) | (1 << 4) | (1 << 3) | (1 << 2) | (1 << 1) | (1 << 0);
+                }
+
                 _magCalInProgress = true;
-                _orientationCalDownSideVisible = true;
-                _orientationCalUpsideDownSideVisible = true;
-                _orientationCalLeftSideVisible = true;
-                _orientationCalRightSideVisible = true;
-                _orientationCalTailDownSideVisible = true;
-                _orientationCalNoseDownSideVisible = true;
+                _orientationCalTailDownSideVisible =   ((sides & (1 << 0)) > 0);
+                _orientationCalNoseDownSideVisible =   ((sides & (1 << 1)) > 0);
+                _orientationCalLeftSideVisible =       ((sides & (1 << 2)) > 0);
+                _orientationCalRightSideVisible =      ((sides & (1 << 3)) > 0);
+                _orientationCalUpsideDownSideVisible = ((sides & (1 << 4)) > 0);
+                _orientationCalDownSideVisible =       ((sides & (1 << 5)) > 0);
             } else if (text == "gyro") {
                 _gyroCalInProgress = true;
                 _orientationCalDownSideVisible = true;
@@ -369,6 +392,7 @@ void SensorsComponentController::_handleUASTextMessage(int uasId, int compId, in
         } else if (side == "up") {
             _orientationCalUpsideDownSideInProgress = false;
             _orientationCalUpsideDownSideDone = true;
+            _orientationCalUpsideDownSideRotate = false;
         } else if (side == "left") {
             _orientationCalLeftSideInProgress = false;
             _orientationCalLeftSideDone = true;
@@ -376,6 +400,7 @@ void SensorsComponentController::_handleUASTextMessage(int uasId, int compId, in
         } else if (side == "right") {
             _orientationCalRightSideInProgress = false;
             _orientationCalRightSideDone = true;
+            _orientationCalRightSideRotate = false;
         } else if (side == "front") {
             _orientationCalNoseDownSideInProgress = false;
             _orientationCalNoseDownSideDone = true;
@@ -383,6 +408,7 @@ void SensorsComponentController::_handleUASTextMessage(int uasId, int compId, in
         } else if (side == "back") {
             _orientationCalTailDownSideInProgress = false;
             _orientationCalTailDownSideDone = true;
+            _orientationCalTailDownSideRotate = false;
         }
         
         _orientationCalAreaHelpText->setProperty("text", "Place you vehicle into one of the orientations shown below and hold it still");
@@ -390,6 +416,11 @@ void SensorsComponentController::_handleUASTextMessage(int uasId, int compId, in
         emit orientationCalSidesInProgressChanged();
         emit orientationCalSidesDoneChanged();
         emit orientationCalSidesRotateChanged();
+        return;
+    }
+
+    if (text.endsWith("side already completed")) {
+        _orientationCalAreaHelpText->setProperty("text", "Orientation already completed, place you vehicle into one of the incomplete orientations shown below and hold it still");
         return;
     }
     
@@ -416,23 +447,13 @@ void SensorsComponentController::_refreshParams(void)
     
     // We ask for a refresh on these first so that the rotation combo show up as fast as possible
     fastRefreshList << "CAL_MAG0_ID" << "CAL_MAG1_ID" << "CAL_MAG2_ID" << "CAL_MAG0_ROT" << "CAL_MAG1_ROT" << "CAL_MAG2_ROT";
-    foreach (QString paramName, fastRefreshList) {
-        _autopilot->refreshParameter(FactSystem::defaultComponentId, paramName);
+    foreach (const QString &paramName, fastRefreshList) {
+        _vehicle->parameterManager()->refreshParameter(FactSystem::defaultComponentId, paramName);
     }
     
     // Now ask for all to refresh
-    _autopilot->refreshParametersPrefix(FactSystem::defaultComponentId, "CAL_");
-    _autopilot->refreshParametersPrefix(FactSystem::defaultComponentId, "SENS_");
-}
-
-bool SensorsComponentController::fixedWing(void)
-{
-    UASInterface* uas = _autopilot->uas();
-    Q_ASSERT(uas);
-    return uas->getSystemType() == MAV_TYPE_FIXED_WING ||
-            uas->getSystemType() == MAV_TYPE_VTOL_DUOROTOR ||
-            uas->getSystemType() == MAV_TYPE_VTOL_QUADROTOR ||
-            uas->getSystemType() == MAV_TYPE_VTOL_TILTROTOR;
+    _vehicle->parameterManager()->refreshParametersPrefix(FactSystem::defaultComponentId, "CAL_");
+    _vehicle->parameterManager()->refreshParametersPrefix(FactSystem::defaultComponentId, "SENS_");
 }
 
 void SensorsComponentController::_updateAndEmitShowOrientationCalArea(bool show)

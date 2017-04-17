@@ -1,59 +1,43 @@
-/*=====================================================================
+/****************************************************************************
+ *
+ *   (c) 2009-2016 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
+ *
+ * QGroundControl is licensed according to the terms in the file
+ * COPYING.md in the root of the source code directory.
+ *
+ ****************************************************************************/
 
- QGroundControl Open Source Ground Control Station
-
- (c) 2009, 2015 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
-
- This file is part of the QGROUNDCONTROL project
-
- QGROUNDCONTROL is free software: you can redistribute it and/or modify
- it under the terms of the GNU General Public License as published by
- the Free Software Foundation, either version 3 of the License, or
- (at your option) any later version.
-
- QGROUNDCONTROL is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU General Public License for more details.
-
- You should have received a copy of the GNU General Public License
- along with QGROUNDCONTROL. If not, see <http://www.gnu.org/licenses/>.
-
- ======================================================================*/
 
 /// @file
-///     @author Gus Grubba <mavlink@grubba.com>
+/// @author Gus Grubba <mavlink@grubba.com>
 
 #include "ScreenToolsController.h"
-#include "MainWindow.h"
+#include <QFontDatabase>
+#include <QScreen>
 
-int ScreenToolsController::_qmlDefaultFontPixelSize = -1;
-
-const double ScreenToolsController::_smallFontPixelSizeRatio =  0.75;
-const double ScreenToolsController::_mediumFontPixelSizeRatio = 1.22;
-const double ScreenToolsController::_largeFontPixelSizeRatio =  1.66;
+#if defined(__ios__)
+#include <sys/utsname.h>
+#endif
 
 ScreenToolsController::ScreenToolsController()
 {
-    MainWindow* mainWindow = MainWindow::instance();
-    // Unit tests can run Qml without MainWindow
-    if (mainWindow) {
-        connect(mainWindow, &MainWindow::repaintCanvas, this, &ScreenToolsController::_updateCanvas);
-    }
+
 }
 
-void ScreenToolsController::_updateCanvas()
+QString
+ScreenToolsController::iOSDevice() const
 {
-    emit repaintRequested();
+#if defined(__ios__)
+    struct utsname systemInfo;
+    uname(&systemInfo);
+    return QString(systemInfo.machine);
+#else
+    return QString();
+#endif
 }
 
-double ScreenToolsController::getQmlDefaultFontPixelSize(void)
+QString
+ScreenToolsController::fixedFontFamily() const
 {
-    if (_qmlDefaultFontPixelSize == -1) {
-        QGCQmlWidgetHolder qmlWidgetHolder;
-        
-        qmlWidgetHolder.setSource(QUrl::fromUserInput("qrc:/qml/ScreenToolsFontQuery.qml"));
-    }
-    
-    return _qmlDefaultFontPixelSize;
+    return QFontDatabase::systemFont(QFontDatabase::FixedFont).family();
 }

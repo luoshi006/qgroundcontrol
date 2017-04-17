@@ -1,71 +1,66 @@
-/*=====================================================================
+/****************************************************************************
+ *
+ *   (c) 2009-2016 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
+ *
+ * QGroundControl is licensed according to the terms in the file
+ * COPYING.md in the root of the source code directory.
+ *
+ ****************************************************************************/
 
- QGroundControl Open Source Ground Control Station
-
- (c) 2009 - 2015 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
-
- This file is part of the QGROUNDCONTROL project
-
- QGROUNDCONTROL is free software: you can redistribute it and/or modify
- it under the terms of the GNU General Public License as published by
- the Free Software Foundation, either version 3 of the License, or
- (at your option) any later version.
-
- QGROUNDCONTROL is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU General Public License for more details.
-
- You should have received a copy of the GNU General Public License
- along with QGROUNDCONTROL. If not, see <http://www.gnu.org/licenses/>.
-
- ======================================================================*/
 
 import QtQuick 2.3
 import QtQuick.Controls 1.2
-import QtQuick.Controls.Styles 1.2
+import QtQuick.Controls.Styles 1.4
 import QtQuick.Dialogs 1.2
 
-import QGroundControl.Controls 1.0
-import QGroundControl.FactSystem 1.0
-import QGroundControl.FactControls 1.0
-import QGroundControl.Palette 1.0
-import QGroundControl.Controllers 1.0
-import QGroundControl.ScreenTools 1.0
+import QGroundControl               1.0
+import QGroundControl.Controls      1.0
+import QGroundControl.FactSystem    1.0
+import QGroundControl.FactControls  1.0
+import QGroundControl.Palette       1.0
+import QGroundControl.Controllers   1.0
+import QGroundControl.ScreenTools   1.0
 
 QGCView {
     id:         qgcView
     viewPanel:  panel
 
+    // Those user visible strings are hard to translate because we can't send the
+    // HTML strings to translation as this can create a security risk. we need to find
+    // a better way to hightlight them, or use less hightlights.
+
     // User visible strings
-    readonly property string title:             "FIRMWARE UPDATE"
-    readonly property string highlightPrefix:   "<font color=\"yellow\">"
+    readonly property string title:             "FIRMWARE"
+    readonly property string highlightPrefix:   "<font color=\"" + qgcPal.warningText + "\">"
     readonly property string highlightSuffix:   "</font>"
-    readonly property string welcomeText:       "QGroundControl can upgrade the firmware on Pixhawk devices, 3DR Radios and PX4 Flow Smart Cameras."
-    readonly property string plugInText:        highlightPrefix + "Plug in your device" + highlightSuffix + " via USB to " + highlightPrefix + "start" + highlightSuffix + " firmware upgrade"
-    readonly property string qgcDisconnectText: "All QGroundControl connections to vehicles must be disconnected prior to firmware upgrade. " +
-                                                    "Click " + highlightPrefix + "Disconnect" + highlightSuffix + " in the toolbar above."
-    property string usbUnplugText:              "Device must be disconnected from USB to start firmware upgrade. " +
-                                                    highlightPrefix + "Disconnect {0}" + highlightSuffix + " from usb."
+    readonly property string welcomeText:       qsTr("%1 can upgrade the firmware on Pixhawk devices, SiK Radios and PX4 Flow Smart Cameras.").arg(QGroundControl.appName)
+    readonly property string plugInText:        "<big>" + highlightPrefix + "Plug in your device" + highlightSuffix + " via USB to " + highlightPrefix + "start" + highlightSuffix + " firmware upgrade.</big>"
+    readonly property string flashFailText:     "If upgrade failed, make sure to connect " + highlightPrefix + "directly" + highlightSuffix + " to a powered USB port on your computer, not through a USB hub. " +
+                                                "Also make sure you are only powered via USB " + highlightPrefix + "not battery" + highlightSuffix + "."
+    readonly property string qgcUnplugText1:    qsTr("All %1 connections to vehicles must be ").arg(QGroundControl.appName) + highlightPrefix + " disconnected " + highlightSuffix + "prior to firmware upgrade."
+    readonly property string qgcUnplugText2:    highlightPrefix + "<big>Please unplug your Pixhawk and/or Radio from USB.</big>" + highlightSuffix
 
     property string firmwareWarningMessage
     property bool   controllerCompleted:      false
     property bool   initialBoardSearch:       true
     property string firmwareName
 
+    property bool _singleFirmwareMode: QGroundControl.corePlugin.options.firmwareUpgradeSingleURL.length != 0   ///< true: running in special single firmware download mode
+
     function cancelFlash() {
-        statusTextArea.append(highlightPrefix + "Upgrade cancelled" + highlightSuffix)
+        statusTextArea.append(highlightPrefix + qsTr("Upgrade cancelled") + highlightSuffix)
         statusTextArea.append("------------------------------------------")
         controller.cancel()
-        flashCompleteWaitTimer.running = true
     }
 
-    QGCPalette { id: qgcPal; colorGroupEnabled: panel.enabled }
+    QGCPalette { id: qgcPal; colorGroupEnabled: true }
 
     FirmwareUpgradeController {
         id:             controller
         progressBar:    progressBar
         statusLog:      statusTextArea
+
+        property var activeVehicle: QGroundControl.multiVehicleManager.activeVehicle
 
         Component.onCompleted: {
             controllerCompleted = true
@@ -75,39 +70,45 @@ QGCView {
             }
         }
 
+        onActiveVehicleChanged: {
+            if (!activeVehicle) {
+                statusTextArea.append(plugInText)
+            }
+        }
+
         onNoBoardFound: {
             initialBoardSearch = false
-            statusTextArea.append(plugInText)
+            if (!QGroundControl.multiVehicleManager.activeVehicleAvailable) {
+                statusTextArea.append(plugInText)
+            }
         }
- 
+
         onBoardGone: {
             initialBoardSearch = false
-            statusTextArea.append(plugInText)
+            if (!QGroundControl.multiVehicleManager.activeVehicleAvailable) {
+                statusTextArea.append(plugInText)
+            }
         }
- 
+
         onBoardFound: {
             if (initialBoardSearch) {
                 // Board was found right away, so something is already plugged in before we've started upgrade
-                if (controller.qgcConnections) {
-                    statusTextArea.append(qgcDisconnectText)
-                } else {
-                    statusTextArea.append(usbUnplugText.replace('{0}', controller.boardType))
-                }
+                statusTextArea.append(qgcUnplugText1)
+                statusTextArea.append(qgcUnplugText2)
+                QGroundControl.multiVehicleManager.activeVehicle.autoDisconnect = true
             } else {
                 // We end up here when we detect a board plugged in after we've started upgrade
-                statusTextArea.append(highlightPrefix + "Found device" + highlightSuffix + ": " + controller.boardType)
-                if (controller.boardType == "Pixhawk" || controller.boardType == "AeroCore") {
-                    showDialog(pixhawkFirmwareSelectDialog, title, 50, StandardButton.Ok | StandardButton.Cancel)
-                 }
-             }
-         }
+                statusTextArea.append(highlightPrefix + qsTr("Found device") + highlightSuffix + ": " + controller.boardType)
+                if (controller.pixhawkBoard || controller.px4FlowBoard) {
+                    showDialog(pixhawkFirmwareSelectDialogComponent, title, qgcView.showDialogDefaultWidth, StandardButton.Ok | StandardButton.Cancel)
+                }
+            }
+        }
 
         onError: {
             hideDialog()
-            flashCompleteWaitTimer.running = true
+            statusTextArea.append(flashFailText)
         }
-
-        onFlashComplete: flashCompleteWaitTimer.running = true
     }
 
     onCompleted: {
@@ -117,103 +118,107 @@ QGCView {
         }
     }
 
-    // After a flash completes we start this timer to trigger resetting the ui back to it's initial state of being ready to
-    // flash another board. We do this only after the timer triggers to leave the results of the previous flash on the screen
-    // for a small amount amount of time.
-
-    Timer {
-        id:         flashCompleteWaitTimer
-        interval:   15000
-
-        onTriggered: {
-            initialBoardSearch = true
-            progressBar.value = 0
-            statusTextArea.append(welcomeText)
-            controller.startBoardSearch()
-        }
-    }
-
     Component {
-        id: pixhawkFirmwareSelectDialog
+        id: pixhawkFirmwareSelectDialogComponent
 
         QGCViewDialog {
-            anchors.fill: parent
- 
-            property bool showVersionSelection: apmFlightStack.checked || advancedMode.checked
+            id:             pixhawkFirmwareSelectDialog
+            anchors.fill:   parent
+
+            property bool showFirmwareTypeSelection:    _advanced.checked
+            property bool px4Flow:                      controller.px4FlowBoard
+
+            function updatePX4VersionDisplay() {
+                var versionString = ""
+                if (_advanced.checked) {
+                    switch (controller.selectedFirmwareType) {
+                    case FirmwareUpgradeController.StableFirmware:
+                        versionString = controller.px4StableVersion
+                        break
+                    case FirmwareUpgradeController.BetaFirmware:
+                        versionString = controller.px4BetaVersion
+                        break
+                    }
+                } else {
+                    versionString = controller.px4StableVersion
+                }
+                px4FlightStack.text = qsTr("PX4 Flight Stack ") + versionString
+            }
+
+            Component.onCompleted: updatePX4VersionDisplay()
 
             function accept() {
                 hideDialog()
-                controller.flash(firmwareVersionCombo.model.get(firmwareVersionCombo.currentIndex).firmwareType)
+                if (_singleFirmwareMode) {
+                    controller.flashSingleFirmwareMode()
+                } else {
+                    var stack = apmFlightStack.checked ? FirmwareUpgradeController.AutoPilotStackAPM : FirmwareUpgradeController.AutoPilotStackPX4
+                    if (px4Flow) {
+                        stack = FirmwareUpgradeController.PX4Flow
+                    }
+
+                    var firmwareType = firmwareVersionCombo.model.get(firmwareVersionCombo.currentIndex).firmwareType
+                    var vehicleType = FirmwareUpgradeController.DefaultVehicleFirmware
+                    if (apmFlightStack.checked) {
+                        vehicleType = controller.vehicleTypeFromVersionIndex(vehicleTypeSelectionCombo.currentIndex)
+                    }
+                    controller.flash(stack, firmwareType, vehicleType)
+                }
             }
- 
+
             function reject() {
-                cancelFlash()
                 hideDialog()
+                cancelFlash()
             }
- 
+
             ExclusiveGroup {
                 id: firmwareGroup
             }
- 
+
             ListModel {
-                id: px4FirmwareTypeList
+                id: firmwareTypeList
 
                 ListElement {
-                    text: qsTr("Standard Version (stable)");
-                    firmwareType: FirmwareUpgradeController.PX4StableFirmware
+                    text:           qsTr("Standard Version (stable)")
+                    firmwareType:   FirmwareUpgradeController.StableFirmware
                 }
                 ListElement {
-                    text: qsTr("Beta Testing (beta)");
-                    firmwareType: FirmwareUpgradeController.PX4BetaFirmware
+                    text:           qsTr("Beta Testing (beta)")
+                    firmwareType:   FirmwareUpgradeController.BetaFirmware
                 }
                 ListElement {
-                    text: qsTr("Developer Build (master)");
-                    firmwareType: FirmwareUpgradeController.PX4DeveloperFirmware
+                    text:           qsTr("Developer Build (master)")
+                    firmwareType:   FirmwareUpgradeController.DeveloperFirmware
                 }
                 ListElement {
-                    text: qsTr("Custom firmware file...");
-                    firmwareType: FirmwareUpgradeController.PX4CustomFirmware
-                 }
+                    text:           qsTr("Custom firmware file...")
+                    firmwareType:   FirmwareUpgradeController.CustomFirmware
+                }
             }
- 
+
             ListModel {
-                id: apmFirmwareTypeList
+                id: px4FlowTypeList
 
                 ListElement {
-                    text: "ArduCopter Quad"
-                    firmwareType: FirmwareUpgradeController.ApmArduCopterQuadFirmware
+                    text:           qsTr("Standard Version (stable)")
+                    firmwareType:   FirmwareUpgradeController.StableFirmware
                 }
                 ListElement {
-                    text: "ArduCopter X8"
-                    firmwareType: FirmwareUpgradeController.ApmArduCopterX8Firmware
+                    text:           qsTr("Custom firmware file...")
+                    firmwareType:   FirmwareUpgradeController.CustomFirmware
+                }
+            }
+
+            ListModel {
+                id: singleFirmwareModeTypeList
+
+                ListElement {
+                    text:           qsTr("Standard Version")
+                    firmwareType:   FirmwareUpgradeController.StableFirmware
                 }
                 ListElement {
-                    text: "ArduCopter Hexa"
-                    firmwareType: FirmwareUpgradeController.ApmArduCopterHexaFirmware
-                }
-                ListElement {
-                    text: "ArduCopter Octo"
-                    firmwareType: FirmwareUpgradeController.ApmArduCopterOctoFirmware
-                }
-                ListElement {
-                    text: "ArduCopter Y"
-                    firmwareType: FirmwareUpgradeController.ApmArduCopterYFirmware
-                }
-                ListElement {
-                    text: "ArduCopter Y6"
-                    firmwareType: FirmwareUpgradeController.ApmArduCopterY6Firmware
-                }
-                ListElement {
-                    text: "ArduCopter Heli"
-                    firmwareType: FirmwareUpgradeController.ApmArduCopterHeliFirmware
-                }
-                ListElement {
-                    text: "ArduPlane"
-                    firmwareType: FirmwareUpgradeController.ApmArduPlaneFirmware
-                }
-                ListElement {
-                    text: "Rover"
-                    firmwareType: FirmwareUpgradeController.ApmRoverFirmware
+                    text:           qsTr("Custom firmware file...")
+                    firmwareType:   FirmwareUpgradeController.CustomFirmware
                 }
             }
 
@@ -224,7 +229,11 @@ QGCView {
                 QGCLabel {
                     width:      parent.width
                     wrapMode:   Text.WordWrap
-                    text:       "Detected Pixhawk board. You can select from the following flight stacks:"
+                    text:       _singleFirmwareMode ? _singleFirmwareLabel : (px4Flow ? _px4FlowLabel : _pixhawkLabel)
+
+                    readonly property string _px4FlowLabel:          qsTr("Detected PX4 Flow board. You can select from the following firmware:")
+                    readonly property string _pixhawkLabel:          qsTr("Detected Pixhawk board. You can select from the following flight stacks:")
+                    readonly property string _singleFirmwareLabel:   qsTr("Press Ok to upgrade your vehicle.")
                 }
 
                 function firmwareVersionChanged(model) {
@@ -242,52 +251,98 @@ QGCView {
                     id:             px4FlightStack
                     checked:        true
                     exclusiveGroup: firmwareGroup
-                    text:           "PX4 Flight Stack (full QGC support)"
+                    text:           qsTr("PX4 Flight Stack ")
+                    visible:        !_singleFirmwareMode && !px4Flow
 
-                    onClicked: parent.firmwareVersionChanged(px4FirmwareTypeList)
+                    onClicked: parent.firmwareVersionChanged(firmwareTypeList)
                 }
 
                 QGCRadioButton {
                     id:             apmFlightStack
                     exclusiveGroup: firmwareGroup
-                    text:           "APM Flight Stack (partial QGC support)"
+                    text:           qsTr("ArduPilot Flight Stack")
+                    visible:        !_singleFirmwareMode && !px4Flow
 
-                    onClicked: parent.firmwareVersionChanged(apmFirmwareTypeList)
+                    onClicked: parent.firmwareVersionChanged(firmwareTypeList)
                 }
- 
+
+                QGCComboBox {
+                    id:             vehicleTypeSelectionCombo
+                    anchors.left:   parent.left
+                    anchors.right:  parent.right
+                    visible:        apmFlightStack.checked
+                    model:          controller.apmAvailableVersions
+                }
+
+                Row {
+                    width:      parent.width
+                    spacing:    ScreenTools.defaultFontPixelWidth / 2
+                    visible:    !px4Flow
+
+                    Rectangle {
+                        height: 1
+                        width:      ScreenTools.defaultFontPixelWidth * 5
+                        color:      qgcPal.text
+                        anchors.verticalCenter: _advanced.verticalCenter
+                    }
+
+                    QGCCheckBox {
+                        id:         _advanced
+                        text:       qsTr("Advanced settings")
+                        checked:    px4Flow ? true : false
+
+                        onClicked: {
+                            firmwareVersionCombo.currentIndex = 0
+                            firmwareVersionWarningLabel.visible = false
+                            updatePX4VersionDisplay()
+                        }
+                    }
+
+                    Rectangle {
+                        height:     1
+                        width:      ScreenTools.defaultFontPixelWidth * 5
+                        color:      qgcPal.text
+                        anchors.verticalCenter: _advanced.verticalCenter
+                    }
+                }
+
                 QGCLabel {
                     width:      parent.width
                     wrapMode:   Text.WordWrap
-                    visible:    showVersionSelection
-                    text:       "Select which version of the above flight stack you would like to install:"
+                    visible:    showFirmwareTypeSelection
+                    text:       px4Flow ? qsTr("Select which version of the firmware you would like to install:") : qsTr("Select which version of the above flight stack you would like to install:")
                 }
- 
+
                 QGCComboBox {
-                    id:         firmwareVersionCombo
-                    width:      200
-                    visible:    showVersionSelection
-                    model:      px4FirmwareTypeList
+                    id:             firmwareVersionCombo
+                    anchors.left:   parent.left
+                    anchors.right:  parent.right
+                    visible:        showFirmwareTypeSelection
+                    model:          _singleFirmwareMode ? singleFirmwareModeTypeList: (px4Flow ? px4FlowTypeList : firmwareTypeList)
+                    currentIndex:   controller.selectedFirmwareType
 
                     onActivated: {
-                        if (model.get(index).firmwareType == FirmwareUpgradeController.PX4BetaFirmware) {
+                        controller.selectedFirmwareType = index
+                        if (model.get(index).firmwareType == FirmwareUpgradeController.BetaFirmware) {
                             firmwareVersionWarningLabel.visible = true
-                            firmwareVersionWarningLabel.text = "WARNING: BETA FIRMWARE. " +
-                                                                    "This firmware version is ONLY intended for beta testers. " +
-                                                                    "Although it has received FLIGHT TESTING, it represents actively changed code. " +
-                                                                    "Do NOT use for normal operation."
-                        } else if (model.get(index).firmwareType == FirmwareUpgradeController.PX4DeveloperFirmware) {
+                            firmwareVersionWarningLabel.text = qsTr("WARNING: BETA FIRMWARE. ") +
+                                    qsTr("This firmware version is ONLY intended for beta testers. ") +
+                                    qsTr("Although it has received FLIGHT TESTING, it represents actively changed code. ") +
+                                    qsTr("Do NOT use for normal operation.")
+                        } else if (model.get(index).firmwareType == FirmwareUpgradeController.DeveloperFirmware) {
                             firmwareVersionWarningLabel.visible = true
-                            firmwareVersionWarningLabel.text = "WARNING: CONTINUOUS BUILD FIRMWARE. " +
-                                                                    "This firmware has NOT BEEN FLIGHT TESTED. " +
-                                                                    "It is only intended for DEVELOPERS. " +
-                                                                    "Run bench tests without props first. " +
-                                                                    "Do NOT fly this without addional safety precautions. " +
-                                                                    "Follow the mailing list actively when using it."
-                         } else {
+                            firmwareVersionWarningLabel.text = qsTr("WARNING: CONTINUOUS BUILD FIRMWARE. ") +
+                                    qsTr("This firmware has NOT BEEN FLIGHT TESTED. ") +
+                                    qsTr("It is only intended for DEVELOPERS. ") +
+                                    qsTr("Run bench tests without props first. ") +
+                                    qsTr("Do NOT fly this without additional safety precautions. ") +
+                                    qsTr("Follow the mailing list actively when using it.")
+                        } else {
                             firmwareVersionWarningLabel.visible = false
                         }
-                     }
-                 }
+                        updatePX4VersionDisplay()
+                    }
+                }
 
                 QGCLabel {
                     id:         firmwareVersionWarningLabel
@@ -295,29 +350,9 @@ QGCView {
                     wrapMode:   Text.WordWrap
                     visible:    false
                 }
-             }
- 
-            QGCCheckBox {
-                id:             advancedMode
-                anchors.bottom: parent.bottom
-                text:           "Advanced mode"
-
-                onClicked: {
-                    firmwareVersionCombo.currentIndex = 0
-                    firmwareVersionWarningLabel.visible = false
-                }
-            }
-
-            QGCButton {
-                anchors.leftMargin: ScreenTools.defaultFontPixelWidth * 2
-                anchors.left:       advancedMode.right
-                anchors.bottom:     parent.bottom
-                text:               "Help me pick a flight stack"
-                onClicked:          Qt.openUrlExternally("http://pixhawk.org/choice")
-            }
+            } // Column
         } // QGCViewDialog
-    } // Component - pixhawkFirmwareSelectDialog
-
+    } // Component - pixhawkFirmwareSelectDialogComponent
 
     Component {
         id: firmwareWarningDialog
@@ -339,7 +374,7 @@ QGCView {
         QGCLabel {
             id:             titleLabel
             text:           title
-            font.pixelSize: ScreenTools.largeFontPixelSize
+            font.pointSize: ScreenTools.mediumFontPointSize
         }
 
         ProgressBar {
@@ -357,7 +392,7 @@ QGCView {
             width:              parent.width
             readOnly:           true
             frameVisible:       false
-            font.pixelSize:     ScreenTools.defaultFontPixelSize
+            font.pointSize:     ScreenTools.defaultFontPointSize
             textFormat:         TextEdit.RichText
             text:               welcomeText
 

@@ -1,4 +1,4 @@
-import QtQuick 2.2
+import QtQuick 2.3
 import QtQuick.Controls 1.2
 import QGroundControl.ScreenTools 1.0
 
@@ -9,8 +9,8 @@ import QGroundControl.ScreenTools 1.0
 Item {
     id: root
     property bool   allowDragging:  true
-    property real   minimumWidth:   ScreenTools.defaultFontPixelSize * (5)
-    property real   minimumHeight:  ScreenTools.defaultFontPixelSize * (5)
+    property real   minimumWidth:   ScreenTools.defaultFontPixelHeight * (5)
+    property real   minimumHeight:  ScreenTools.defaultFontPixelHeight * (5)
     property alias  tForm:          tform
     signal          resetRequested()
     transform: Scale {

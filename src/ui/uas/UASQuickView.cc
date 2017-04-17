@@ -1,10 +1,15 @@
 #include "UASQuickView.h"
-#include <QMetaMethod>
-#include <QDebug>
 #include "UASQuickViewItemSelect.h"
 #include "UASQuickViewTextItem.h"
+#include "MultiVehicleManager.h"
+#include "UAS.h"
+#include "QGCApplication.h"
+
+#include <QMetaMethod>
+#include <QDebug>
 #include <QSettings>
 #include <QInputDialog>
+
 UASQuickView::UASQuickView(QWidget *parent) : QWidget(parent),
     uas(NULL)
 {
@@ -17,12 +22,8 @@ UASQuickView::UASQuickView(QWidget *parent) : QWidget(parent),
     m_verticalLayoutList.append(new QVBoxLayout());
     ui.horizontalLayout->addItem(m_verticalLayoutList[0]);
 
-    connect(UASManager::instance(),SIGNAL(activeUASSet(UASInterface*)),this,SLOT(setActiveUAS(UASInterface*)));
-    connect(UASManager::instance(),SIGNAL(UASCreated(UASInterface*)),this,SLOT(addUAS(UASInterface*)));
-    if (UASManager::instance()->getActiveUAS())
-    {
-        addUAS(UASManager::instance()->getActiveUAS());
-    }
+    connect(qgcApp()->toolbox()->multiVehicleManager(), &MultiVehicleManager::activeVehicleChanged, this, &UASQuickView::_activeVehicleChanged);
+    _activeVehicleChanged(qgcApp()->toolbox()->multiVehicleManager()->activeVehicle());
     this->setContextMenuPolicy(Qt::ActionsContextMenu);
 
     loadSettings();
@@ -32,7 +33,6 @@ UASQuickView::UASQuickView(QWidget *parent) : QWidget(parent),
     {
         valueEnabled("altitudeAMSL");
         valueEnabled("altitudeAMSLFT");
-        valueEnabled("altitudeWGS84");
         valueEnabled("altitudeRelative");
         valueEnabled("groundSpeed");
         valueEnabled("distToWaypoint");
@@ -40,16 +40,16 @@ UASQuickView::UASQuickView(QWidget *parent) : QWidget(parent),
 
     QAction *action = new QAction("Add/Remove Items",this);
     action->setCheckable(false);
-    connect(action,SIGNAL(triggered()),this,SLOT(actionTriggered()));
+    connect(action,&QAction::triggered,this, &UASQuickView::addActionTriggered);
     this->addAction(action);
 
     QAction *columnaction = new QAction("Set Column Count",this);
     columnaction->setCheckable(false);
-    connect(columnaction,SIGNAL(triggered()),this,SLOT(columnActionTriggered()));
+    connect(columnaction,&QAction::triggered,this,&UASQuickView::columnActionTriggered);
     this->addAction(columnaction);
 
     updateTimer = new QTimer(this);
-    connect(updateTimer,SIGNAL(timeout()),this,SLOT(updateTimerTick()));
+    connect(updateTimer,&QTimer::timeout,this,&UASQuickView::updateTimerTick);
     updateTimer->start(1000);
 
 }
@@ -74,7 +74,7 @@ void UASQuickView::columnActionTriggered()
     saveSettings();
 }
 
-void UASQuickView::actionTriggered()
+void UASQuickView::addActionTriggered()
 {
     if (quickViewSelectDialog)
     {
@@ -82,9 +82,10 @@ void UASQuickView::actionTriggered()
         return;
     }
     quickViewSelectDialog = new UASQuickViewItemSelect();
-    connect(quickViewSelectDialog,SIGNAL(destroyed()),this,SLOT(selectDialogClosed()));
-    connect(quickViewSelectDialog,SIGNAL(valueDisabled(QString)),this,SLOT(valueDisabled(QString)));
-    connect(quickViewSelectDialog,SIGNAL(valueEnabled(QString)),this,SLOT(valueEnabled(QString)));
+    connect(quickViewSelectDialog,&UASQuickViewItemSelect::destroyed,this,&UASQuickView::selectDialogClosed);
+    connect(quickViewSelectDialog,&UASQuickViewItemSelect::valueDisabled,this,&UASQuickView::valueDisabled);
+    connect(quickViewSelectDialog,&UASQuickViewItemSelect::valueEnabled,this,&UASQuickView::valueEnabled);
+
     quickViewSelectDialog->setAttribute(Qt::WA_DeleteOnClose,true);
     for (QMap<QString,double>::const_iterator i = uasPropertyValueMap.constBegin();i!=uasPropertyValueMap.constEnd();i++)
     {
@@ -159,7 +160,7 @@ void UASQuickView::sortItems(int columncount)
         m_PropertyToLayoutIndexMap.remove(i.key());
         itemlist.append(i.value());
     }
-    // Item list has all the widgets availble, now re-add them to the layouts.
+    // Item list has all the widgets available, now re-add them to the layouts.
     for (int i = 0; i < m_verticalLayoutList.size(); i++)
     {
         ui.horizontalLayout->removeItem(m_verticalLayoutList[i]);
@@ -198,6 +199,7 @@ void UASQuickView::resizeEvent(QResizeEvent *evt)
 }
 void UASQuickView::recalculateItemTextSizing()
 {
+    return;
     int minpixelsize = 65535;
     for (QMap<QString,UASQuickViewItem*>::const_iterator i = uasPropertyToLabelMap.constBegin();i!=uasPropertyToLabelMap.constEnd();i++)
     {
@@ -249,26 +251,13 @@ void UASQuickView::updateTimerTick()
     }
 }
 
-void UASQuickView::addUAS(UASInterface* uas)
+void UASQuickView::_activeVehicleChanged(Vehicle* vehicle)
 {
-    if (uas)
-    {
-        if (!this->uas)
-        {
-            setActiveUAS(uas);
-        }
-    }
-}
-
-void UASQuickView::setActiveUAS(UASInterface* uas)
-{
-    if (!uas)
-    {
+    if (uas || !vehicle) {
         return;
     }
-    this->uas = uas;
-    connect(uas,SIGNAL(valueChanged(int,QString,QString,QVariant,quint64)),this,SLOT(valueChanged(int,QString,QString,QVariant,quint64)));
-    //connect(uas,SIGNAL())
+    this->uas = vehicle->uas();
+    connect(uas, SIGNAL(valueChanged(int,QString,QString,QVariant,quint64)),this,SLOT(valueChanged(int,QString,QString,QVariant,quint64)));
 }
 void UASQuickView::addSource(MAVLinkDecoder *decoder)
 {

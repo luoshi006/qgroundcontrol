@@ -1,110 +1,113 @@
-/*=====================================================================
+/****************************************************************************
+ *
+ *   (c) 2009-2016 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
+ *
+ * QGroundControl is licensed according to the terms in the file
+ * COPYING.md in the root of the source code directory.
+ *
+ ****************************************************************************/
 
- QGroundControl Open Source Ground Control Station
 
- (c) 2009 - 2014 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
-
- This file is part of the QGROUNDCONTROL project
-
- QGROUNDCONTROL is free software: you can redistribute it and/or modify
- it under the terms of the GNU General Public License as published by
- the Free Software Foundation, either version 3 of the License, or
- (at your option) any later version.
-
- QGROUNDCONTROL is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU General Public License for more details.
-
- You should have received a copy of the GNU General Public License
- along with QGROUNDCONTROL. If not, see <http://www.gnu.org/licenses/>.
-
- ======================================================================*/
-
-#ifndef MOCKLINKMISSIONITEMHANDLER_H
-#define MOCKLINKMISSIONITEMHANDLER_H
-
-// FIXME: This file is a work in progress
+#ifndef MockLinkMissionItemHandler_H
+#define MockLinkMissionItemHandler_H
 
 #include <QObject>
-#include <vector>
+#include <QMap>
+#include <QTimer>
 
 #include "QGCMAVLink.h"
+#include "QGCLoggingCategory.h"
+#include "MAVLinkProtocol.h"
 
-/* Alreedy defined in MAVLinkSimulationLink.h above!
-enum PX_WAYPOINTPLANNER_STATES {
-    PX_WPP_IDLE = 0,
-    PX_WPP_SENDLIST,
-    PX_WPP_SENDLIST_SENDWPS,
-    PX_WPP_GETLIST,
-    PX_WPP_GETLIST_GETWPS,
-    PX_WPP_GETLIST_GOTALL
-};
-*/
+class MockLink;
+
+Q_DECLARE_LOGGING_CATEGORY(MockLinkMissionItemHandlerLog)
 
 class MockLinkMissionItemHandler : public QObject
 {
     Q_OBJECT
 
 public:
-    MockLinkMissionItemHandler(uint16_t systemId, QObject* parent = NULL);
+    MockLinkMissionItemHandler(MockLink* mockLink, MAVLinkProtocol* mavlinkProtocol);
+    ~MockLinkMissionItemHandler();
+    
+    // Prepares for destruction on correct thread
+    void shutdown(void);
 
     /// @brief Called to handle mission item related messages. All messages should be passed to this method.
     ///         It will handle the appropriate set.
-    void handleMessage(const mavlink_message_t& msg);
+    /// @return true: message handled
+    bool handleMessage(const mavlink_message_t& msg);
+    
+    typedef enum {
+        FailNone,                           // No failures
+        FailReadRequestListNoResponse,      // Don't send MISSION_COUNT in response to MISSION_REQUEST_LIST
+        FailReadRequestListFirstResponse,   // Don't send MISSION_COUNT in response to first MISSION_REQUEST_LIST, allow subsequent to go through
+        FailReadRequest0NoResponse,         // Don't send MISSION_ITEM in response to MISSION_REQUEST item 0
+        FailReadRequest1NoResponse,         // Don't send MISSION_ITEM in response to MISSION_REQUEST item 1
+        FailReadRequest1FirstResponse,      // Don't send MISSION_ITEM in response to MISSION_REQUEST item 1 on first try, allow subsequent request to go through
+        FailReadRequest0IncorrectSequence,  // Respond to MISSION_REQUEST 0 with incorrect sequence number in  MISSION_ITEM
+        FailReadRequest1IncorrectSequence,  // Respond to MISSION_REQUEST 1 with incorrect sequence number in  MISSION_ITEM
+        FailReadRequest0ErrorAck,           // Respond to MISSION_REQUEST 0 with MISSION_ACK error
+        FailReadRequest1ErrorAck,           // Respond to MISSION_REQUEST 1 bogus MISSION_ACK error
+        FailWriteMissionCountNoResponse,    // Don't respond to MISSION_COUNT with MISSION_REQUEST 0
+        FailWriteMissionCountFirstResponse, // Don't respond to first MISSION_COUNT with MISSION_REQUEST 0, respond to subsequent MISSION_COUNT requests
+        FailWriteRequest1NoResponse,        // Don't respond to MISSION_ITEM 0 with MISSION_REQUEST 1
+        FailWriteRequest0IncorrectSequence, // Item 0 MISSION_REQUEST sent has wrong sequence number
+        FailWriteRequest1IncorrectSequence, // Item 1 MISSION_REQUEST sent has wrong sequence number
+        FailWriteRequest0ErrorAck,          // Instead of sending MISSION_REQUEST 0, send MISSION_ACK error
+        FailWriteRequest1ErrorAck,          // Instead of sending MISSION_REQUEST 1, send MISSION_ACK error
+        FailWriteFinalAckNoResponse,        // Don't send the final MISSION_ACK
+        FailWriteFinalAckErrorAck,          // Send an error as the final MISSION_ACK
+        FailWriteFinalAckMissingRequests,   // Send the MISSION_ACK before all items have been requested
+    } FailureMode_t;
 
-#if 0
-signals:
-    void messageSent(const mavlink_message_t& msg);
+    /// Sets a failure mode for unit testing
+    ///     @param failureMode Type of failure to simulate
+    void setMissionItemFailureMode(FailureMode_t failureMode);
+    
+    /// Called to send a MISSION_ACK message while the MissionManager is in idle state
+    void sendUnexpectedMissionAck(MAV_MISSION_RESULT ackType);
+    
+    /// Called to send a MISSION_ITEM message while the MissionManager is in idle state
+    void sendUnexpectedMissionItem(void);
+    
+    /// Called to send a MISSION_REQUEST message while the MissionManager is in idle state
+    void sendUnexpectedMissionRequest(void);
+    
+    /// Reset the state of the MissionItemHandler to no items, no transactions in progress.
+    void reset(void) { _missionItems.clear(); }
 
-protected:
-    MAVLinkSimulationLink* link;
-    bool idle;      				///< indicates if the system is following the waypoints or is waiting
-    uint16_t current_active_wp_id;		///< id of current waypoint
-    bool yawReached;						///< boolean for yaw attitude reached
-    bool posReached;						///< boolean for position reached
-    uint64_t timestamp_lastoutside_orbit;///< timestamp when the MAV was last outside the orbit or had the wrong yaw value
-    uint64_t timestamp_firstinside_orbit;///< timestamp when the MAV was the first time after a waypoint change inside the orbit and had the correct yaw value
+    void setSendHomePositionOnEmptyList(bool sendHomePositionOnEmptyList) { _sendHomePositionOnEmptyList = sendHomePositionOnEmptyList; }
 
-    std::vector<mavlink_mission_item_t*> waypoints1;	///< vector1 that holds the waypoints
-    std::vector<mavlink_mission_item_t*> waypoints2;	///< vector2 that holds the waypoints
-
-    std::vector<mavlink_mission_item_t*>* waypoints;		///< pointer to the currently active waypoint vector
-    std::vector<mavlink_mission_item_t*>* waypoints_receive_buffer;	///< pointer to the receive buffer waypoint vector
-    PX_WAYPOINTPLANNER_STATES current_state;
-    uint16_t protocol_current_wp_id;
-    uint16_t protocol_current_count;
-    uint8_t protocol_current_partner_systemid;
-    uint8_t protocol_current_partner_compid;
-    uint64_t protocol_timestamp_lastaction;
-    unsigned int protocol_timeout;
-    uint64_t timestamp_last_send_setpoint;
-    uint8_t systemid;
-    uint8_t compid;
-    unsigned int setpointDelay;
-    float yawTolerance;
-    bool verbose;
-    bool debug;
-    bool silent;
-
-    void send_waypoint_ack(uint8_t target_systemid, uint8_t target_compid, uint8_t type);
-    void send_waypoint_current(uint16_t seq);
-    void send_setpoint(uint16_t seq);
-    void send_waypoint_count(uint8_t target_systemid, uint8_t target_compid, uint16_t count);
-    void send_waypoint(uint8_t target_systemid, uint8_t target_compid, uint16_t seq);
-    void send_waypoint_request(uint8_t target_systemid, uint8_t target_compid, uint16_t seq);
-    void send_waypoint_reached(uint16_t seq);
-    float distanceToSegment(uint16_t seq, float x, float y, float z);
-    float distanceToPoint(uint16_t seq, float x, float y, float z);
-    float distanceToPoint(uint16_t seq, float x, float y);
-    void mavlink_handler(const mavlink_message_t* msg);
-#endif
+private slots:
+    void _missionItemResponseTimeout(void);
 
 private:
-    uint16_t _vehicleSystemId;  ///< System id of this vehicle
+    void _handleMissionRequestList(const mavlink_message_t& msg);
+    void _handleMissionRequest(const mavlink_message_t& msg);
+    void _handleMissionItem(const mavlink_message_t& msg);
+    void _handleMissionCount(const mavlink_message_t& msg);
+    void _requestNextMissionItem(int sequenceNumber);
+    void _sendAck(MAV_MISSION_RESULT ackType);
+    void _startMissionItemResponseTimer(void);
 
-    QList<mavlink_mission_item_t>   _missionItems;  ///< Current set of mission itemss
-
+private:
+    MockLink* _mockLink;
+    
+    int _writeSequenceCount;    ///< Numbers of items about to be written
+    int _writeSequenceIndex;    ///< Current index being reqested
+    
+    typedef QMap<uint16_t, mavlink_mission_item_t>   MissionList_t;
+    MissionList_t   _missionItems;
+    
+    QTimer*             _missionItemResponseTimer;
+    FailureMode_t       _failureMode;
+    bool                _sendHomePositionOnEmptyList;
+    MAVLinkProtocol*    _mavlinkProtocol;
+    bool                _failReadRequestListFirstResponse;
+    bool                _failReadRequest1FirstResponse;
+    bool                _failWriteMissionCountFirstResponse;
 };
 
-#endif // MAVLINKSIMULATIONWAYPOINTPLANNER_H
+#endif

@@ -1,25 +1,12 @@
-/*=====================================================================
- 
- QGroundControl Open Source Ground Control Station
- 
- (c) 2009, 2015 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
- 
- This file is part of the QGROUNDCONTROL project
- 
- QGROUNDCONTROL is free software: you can redistribute it and/or modify
- it under the terms of the GNU General Public License as published by
- the Free Software Foundation, either version 3 of the License, or
- (at your option) any later version.
- 
- QGROUNDCONTROL is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU General Public License for more details.
- 
- You should have received a copy of the GNU General Public License
- along with QGROUNDCONTROL. If not, see <http://www.gnu.org/licenses/>.
- 
- ======================================================================*/
+/****************************************************************************
+ *
+ *   (c) 2009-2016 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
+ *
+ * QGroundControl is licensed according to the terms in the file
+ * COPYING.md in the root of the source code directory.
+ *
+ ****************************************************************************/
+
 
 /// @file
 ///     @author Don Gagne <don@thegagnes.com>
@@ -27,10 +14,8 @@
 #include "AirframeComponentController.h"
 #include "AirframeComponentAirframes.h"
 #include "QGCMAVLink.h"
-#include "UASManager.h"
-#include "AutoPilotPluginManager.h"
+#include "MultiVehicleManager.h"
 #include "QGCApplication.h"
-#include "QGCMessageBox.h"
 
 #include <QVariant>
 #include <QQmlProperty>
@@ -57,8 +42,7 @@ AirframeComponentController::AirframeComponentController(void) :
     // Load up member variables
     
     bool autostartFound = false;
-    _autostartId = getParameterFact(FactSystem::defaultComponentId, "SYS_AUTOSTART")->value().toInt();
-
+    _autostartId = getParameterFact(FactSystem::defaultComponentId, "SYS_AUTOSTART")->rawValue().toInt();
 
     
     for (int tindex = 0; tindex < AirframeComponentAirframes::get().count(); tindex++) {
@@ -98,8 +82,8 @@ AirframeComponentController::~AirframeComponentController()
 
 void AirframeComponentController::changeAutostart(void)
 {
-	if (UASManager::instance()->getUASList().count() > 1) {
-		QGCMessageBox::warning("Airframe Config", "You cannot change airframe configuration while connected to multiple vehicles.");
+    if (qgcApp()->toolbox()->multiVehicleManager()->vehicles()->count() > 1) {
+        qgcApp()->showMessage("You cannot change airframe configuration while connected to multiple vehicles.");
 		return;
 	}
 	
@@ -114,8 +98,8 @@ void AirframeComponentController::changeAutostart(void)
     connect(sysAutoConfigFact, &Fact::vehicleUpdated, this, &AirframeComponentController::_waitParamWriteSignal);
     
     // We use forceSetValue to params are sent even if the previous value is that same as the new value
-    sysAutoStartFact->forceSetValue(_autostartId);
-    sysAutoConfigFact->forceSetValue(1);
+    sysAutoStartFact->forceSetRawValue(_autostartId);
+    sysAutoConfigFact->forceSetRawValue(1);
 }
 
 void AirframeComponentController::_waitParamWriteSignal(QVariant value)
@@ -133,13 +117,13 @@ void AirframeComponentController::_waitParamWriteSignal(QVariant value)
 
 void AirframeComponentController::_rebootAfterStackUnwind(void)
 {    
-    _uas->executeCommand(MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN, 1, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0);
+    _vehicle->sendMavCommand(_vehicle->defaultComponentId(), MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN, true /* showError */, 1.0f);
     qgcApp()->processEvents(QEventLoop::ExcludeUserInputEvents);
     for (unsigned i = 0; i < 2000; i++) {
         QGC::SLEEP::usleep(500);
         qgcApp()->processEvents(QEventLoop::ExcludeUserInputEvents);
     }
-    LinkManager::instance()->disconnectAll();
+    qgcApp()->toolbox()->linkManager()->disconnectAll();
     qgcApp()->restoreOverrideCursor();
 }
 

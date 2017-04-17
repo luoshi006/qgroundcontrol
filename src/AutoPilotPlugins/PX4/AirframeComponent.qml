@@ -1,29 +1,16 @@
-/*=====================================================================
+/****************************************************************************
+ *
+ *   (c) 2009-2016 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
+ *
+ * QGroundControl is licensed according to the terms in the file
+ * COPYING.md in the root of the source code directory.
+ *
+ ****************************************************************************/
 
- QGroundControl Open Source Ground Control Station
 
- (c) 2009 - 2015 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
-
- This file is part of the QGROUNDCONTROL project
-
- QGROUNDCONTROL is free software: you can redistribute it and/or modify
- it under the terms of the GNU General Public License as published by
- the Free Software Foundation, either version 3 of the License, or
- (at your option) any later version.
-
- QGROUNDCONTROL is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU General Public License for more details.
-
- You should have received a copy of the GNU General Public License
- along with QGROUNDCONTROL. If not, see <http://www.gnu.org/licenses/>.
-
- ======================================================================*/
-
-import QtQuick 2.2
+import QtQuick 2.3
 import QtQuick.Controls 1.2
-import QtQuick.Controls.Styles 1.2
+import QtQuick.Controls.Styles 1.4
 import QtQuick.Dialogs 1.2
 
 import QGroundControl.FactSystem 1.0
@@ -33,114 +20,133 @@ import QGroundControl.Controls 1.0
 import QGroundControl.Controllers 1.0
 import QGroundControl.ScreenTools 1.0
 
-QGCView {
-    id:         rootQGCView
-    viewPanel:  panel
-
-    QGCPalette { id: qgcPal; colorGroupEnabled: panel.enabled }
-
-    AirframeComponentController {
-        id:         controller
-        factPanel:  panel
-
-        Component.onCompleted: {
-            if (controller.showCustomConfigPanel) {
-                showDialog(customConfigDialogComponent, "Custom Airframe Config", 50, StandardButton.Reset)
-            }
-        }
-    }
+SetupPage {
+    id:             airframePage
+    pageComponent:  pageComponent
 
     Component {
-        id: customConfigDialogComponent
+        id: pageComponent
 
-        QGCViewMessage {
-            id:             customConfigDialog
+        Column {
+            id:     mainColumn
+            width:  availableWidth
 
-            message:        "Your vehicle is using a custom airframe configuration. " +
-                                "This configuration can only be modified through the Parameter Editor.\n\n" +
-                                "If you want to Reset your airframe configuration and select a standard configuration, click 'Reset' above."
+            property real _minW:        ScreenTools.defaultFontPixelWidth * 30
+            property real _boxWidth:    _minW
+            property real _boxSpace:    ScreenTools.defaultFontPixelWidth
 
-            property Fact sys_autostart: controller.getParameterFact(-1, "SYS_AUTOSTART")
+            readonly property real spacerHeight: ScreenTools.defaultFontPixelHeight
 
-            function accept() {
-                sys_autostart.value = 0
-                customConfigDialog.hideDialog()
-            }
-        }
-    }
-
-    Component {
-        id: applyRestartDialogComponent
-
-        QGCViewDialog {
-            id: applyRestartDialog
-
-            function accept() {
-                controller.changeAutostart()
-                applyRestartDialog.hideDialog()
+            onWidthChanged: {
+                computeDimensions()
             }
 
-            QGCLabel {
-                anchors.fill:   parent
-                wrapMode:       Text.WordWrap
-                text:           "Clicking Apply will save the changes you have made to your aiframe configuration. " +
-                                "Your vehicle will also be rebooted in order to complete the process. " +
-                                "After your vehicle reboots, you can reconnect it to QGroundControl."
+            Component.onCompleted: computeDimensions()
+
+            function computeDimensions() {
+                var sw  = 0
+                var rw  = 0
+                var idx = Math.floor(mainColumn.width / (_minW + ScreenTools.defaultFontPixelWidth))
+                if(idx < 1) {
+                    _boxWidth = mainColumn.width
+                    _boxSpace = 0
+                } else {
+                    _boxSpace = 0
+                    if(idx > 1) {
+                        _boxSpace = ScreenTools.defaultFontPixelWidth
+                        sw = _boxSpace * (idx - 1)
+                    }
+                    rw = mainColumn.width - sw
+                    _boxWidth = rw / idx
+                }
             }
-        }
-    }
 
-    QGCViewPanel {
-        id:             panel
-        anchors.fill:   parent
+            AirframeComponentController {
+                id:         controller
+                factPanel:  airframePage.viewPanel
 
-        QGCLabel {
-            id:             header
-            width:          parent.width
-            font.pixelSize: ScreenTools.largeFontPixelSize
-            text:           "AIRFRAME CONFIG"
-        }
+                Component.onCompleted: {
+                    if (controller.showCustomConfigPanel) {
+                        showDialog(customConfigDialogComponent, qsTr("Custom Airframe Config"), qgcView.showDialogDefaultWidth, StandardButton.Reset)
+                    }
+                }
+            }
 
-        Item {
-            id:             headingSpacer
-            anchors.top:    header.bottom
-            height:         20
-            width:          20
-        }
+            Component {
+                id: customConfigDialogComponent
 
-        QGCLabel {
-            anchors.top:    headingSpacer.bottom
-            width:          parent.width - applyButton.width - 5
-            text:           "Please select your airframe type. Click 'Apply and Restart' to reboot the autopilot. Please re-connect then manually."
-            wrapMode:       Text.WordWrap
-        }
+                QGCViewMessage {
+                    id:       customConfigDialog
+                    message:  qsTr("Your vehicle is using a custom airframe configuration. ") +
+                              qsTr("This configuration can only be modified through the Parameter Editor.\n\n") +
+                              qsTr("If you want to reset your airframe configuration and select a standard configuration, click 'Reset' above.")
 
-        QGCButton {
-            id:             applyButton
-            anchors.top:    headingSpacer.bottom
-            anchors.right:  parent.right
-            text:           "Apply and Restart"
+                    property Fact sys_autostart: controller.getParameterFact(-1, "SYS_AUTOSTART")
 
-            onClicked:      showDialog(applyRestartDialogComponent, "Apply and Restart", 50, StandardButton.Apply | StandardButton.Cancel)
-        }
+                    function accept() {
+                        sys_autostart.value = 0
+                        customConfigDialog.hideDialog()
+                    }
+                }
+            }
 
-        Item {
-            id:             lastSpacer
-            anchors.top:    applyButton.bottom
-            height:         20
-            width:          10
-        }
+            Component {
+                id: applyRestartDialogComponent
 
-        ScrollView {
-            id:                         scroll
-            anchors.top:                lastSpacer.bottom
-            anchors.bottom:             parent.bottom
-            width:                      parent.width
-            horizontalScrollBarPolicy:  Qt.ScrollBarAlwaysOff
+                QGCViewDialog {
+                    id: applyRestartDialog
+
+                    function accept() {
+                        controller.changeAutostart()
+                        applyRestartDialog.hideDialog()
+                    }
+
+                    QGCLabel {
+                        anchors.fill:   parent
+                        wrapMode:       Text.WordWrap
+                        text:           qsTr("Clicking “Apply” will save the changes you have made to your airframe configuration.<br><br>\
+All vehicle parameters other than Radio Calibration will be reset.<br><br>\
+Your vehicle will also be restarted in order to complete the process.")
+                    }
+                }
+            }
+
+            Item {
+                id:             helpApplyRow
+                anchors.left:   parent.left
+                anchors.right:  parent.right
+                height:         Math.max(helpText.contentHeight, applyButton.height)
+
+                QGCLabel {
+                    id:             helpText
+                    width:          parent.width - applyButton.width - 5
+                    text:           (controller.currentVehicleName != "" ?
+                                         qsTr("You've connected a %1.").arg(controller.currentVehicleName) :
+                                         qsTr("Airframe is not set.")) +
+                                    qsTr("To change this configuration, select the desired airframe below then click “Apply and Restart”.")
+                    font.family:    ScreenTools.demiboldFontFamily
+                    wrapMode:       Text.WordWrap
+                }
+
+                QGCButton {
+                    id:             applyButton
+                    anchors.right:  parent.right
+                    text:           qsTr("Apply and Restart")
+
+                    onClicked:      showDialog(applyRestartDialogComponent, qsTr("Apply and Restart"), qgcView.showDialogDefaultWidth, StandardButton.Apply | StandardButton.Cancel)
+                }
+            }
+
+            Item {
+                id:             lastSpacer
+                height:         parent.spacerHeight
+                width:          10
+            }
 
             Flow {
-                width:      scroll.width
-                spacing:    10
+                id:         flowView
+                width:      parent.width
+                spacing:    _boxSpace
 
                 ExclusiveGroup {
                     id: airframeTypeExclusive
@@ -151,89 +157,89 @@ QGCView {
 
                     // Outer summary item rectangle
                     Rectangle {
-                        id:     airframeBackground
-                        readonly property real titleHeight: 30
-                        readonly property real innerMargin: 10
+                        width:  _boxWidth
+                        height: ScreenTools.defaultFontPixelHeight * 14
+                        color:  qgcPal.window
 
-                        width:  250
-                        height: 200
-                        color:  (modelData.name != controller.currentAirframeType) ? qgcPal.windowShade : qgcPal.buttonHighlight
+                        readonly property real titleHeight: ScreenTools.defaultFontPixelHeight * 1.75
+                        readonly property real innerMargin: ScreenTools.defaultFontPixelWidth
 
                         MouseArea {
-                                anchors.fill: parent
-                                onClicked: airframeCheckBox.checked = true
+                            anchors.fill: parent
+
+                            onClicked: {
+                                applyButton.primary = true
+                                airframeCheckBox.checked = true
                             }
+                        }
+
+                        QGCLabel {
+                            id:     title
+                            text:   modelData.name
+                        }
 
                         Rectangle {
-                            id:     title
-                            width:  parent.width
-                            height: parent.titleHeight
-                            color:  qgcPal.windowShadeDark
-
-                            Text {
-                                anchors.fill:   parent
-
-                                color:          qgcPal.buttonText
-                                font.pixelSize: 12
-                                text:           modelData.name
-
-                                verticalAlignment:      TextEdit.AlignVCenter
-                                horizontalAlignment:    TextEdit.AlignHCenter
-                            }
-                        }
-
-                        Image {
-                            id:     image
-                            x:      innerMargin
-                            width:  parent.width - (innerMargin * 2)
-                            height: parent.height - title.height - combo.height - (innerMargin * 3)
-                            anchors.topMargin:  innerMargin
+                            anchors.topMargin:  ScreenTools.defaultFontPixelHeight / 2
                             anchors.top:        title.bottom
+                            anchors.bottom:     parent.bottom
+                            anchors.left:       parent.left
+                            anchors.right:      parent.right
+                            color:              airframeCheckBox.checked ? qgcPal.buttonHighlight : qgcPal.windowShade
 
-                            source:     modelData.imageResource
-                            fillMode:   Image.PreserveAspectFit
-                            smooth:     true
+                            Image {
+                                id:                 image
+                                anchors.margins:    innerMargin
+                                anchors.top:        parent.top
+                                anchors.bottom:     combo.top
+                                anchors.left:       parent.left
+                                anchors.right:      parent.right
+                                fillMode:           Image.PreserveAspectFit
+                                smooth:             true
+                                mipmap:             true
+                                source:             modelData.imageResource
+                            }
 
-                        }
+                            QGCCheckBox {
+                                // Although this item is invisible we still use it to manage state
+                                id:             airframeCheckBox
+                                checked:        modelData.name == controller.currentAirframeType
+                                exclusiveGroup: airframeTypeExclusive
+                                visible:        false
 
-                        QGCCheckBox {
-                            id:             airframeCheckBox
-                            anchors.bottom: image.bottom
-                            anchors.right: image.right
-                            checked:        modelData.name == controller.currentAirframeType
-                            exclusiveGroup: airframeTypeExclusive
-
-                            onCheckedChanged: {
-                                if (checked && combo.currentIndex != -1) {
-                                    controller.autostartId = modelData.airframes[combo.currentIndex].autostartId
-                                    airframeBackground.color = qgcPal.buttonHighlight;
-                                } else {
-                                    airframeBackground.color = qgcPal.windowShade;
+                                onCheckedChanged: {
+                                    if (checked && combo.currentIndex != -1) {
+                                        console.log("check box change", combo.currentIndex)
+                                        controller.autostartId = modelData.airframes[combo.currentIndex].autostartId
+                                    }
                                 }
                             }
-                        }
 
-                        QGCComboBox {
-                            id:     combo
-                            objectName: modelData.airframeType + "ComboBox"
-                            x:      innerMargin
-                            anchors.topMargin: innerMargin
-                            anchors.top: image.bottom
-                            width:  parent.width - (innerMargin * 2)
-                            model:  modelData.airframes
-                            currentIndex: (modelData.name == controller.currentAirframeType) ? controller.currentVehicleIndex : -1
+                            QGCComboBox {
+                                id:                 combo
+                                objectName:         modelData.airframeType + "ComboBox"
+                                anchors.margins:    innerMargin
+                                anchors.bottom:     parent.bottom
+                                anchors.left:       parent.left
+                                anchors.right:      parent.right
+                                model:              modelData.airframes
 
-                            onActivated: {
-                                if (index != -1) {
-                                    currentIndex = index
-                                    controller.autostartId = modelData.airframes[index].autostartId
+                                Component.onCompleted: {
+                                    if (airframeCheckBox.checked) {
+                                        currentIndex = controller.currentVehicleIndex
+                                    }
+                                }
+
+                                onActivated: {
+                                    applyButton.primary = true
                                     airframeCheckBox.checked = true;
+                                    console.log("combo change", index)
+                                    controller.autostartId = modelData.airframes[index].autostartId
                                 }
                             }
                         }
                     }
                 } // Repeater - summary boxes
             } // Flow - summary boxes
-        } // Scroll View - summary boxes
-    } // QGCViewPanel
-} // QGCView
+        } // Column
+    } // Component
+} // SetupPage

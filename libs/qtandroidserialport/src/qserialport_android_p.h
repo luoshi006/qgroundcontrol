@@ -49,6 +49,9 @@
 #include <QtCore/qstringlist.h>
 #include <QtCore/qthread.h>
 
+#include "QGCLoggingCategory.h"
+
+Q_DECLARE_LOGGING_CATEGORY(AndroidSerialPortLog)
 
 QT_BEGIN_NAMESPACE
 
@@ -108,10 +111,11 @@ public:
 
     qint64 pendingBytesWritten;
 
+    static void setNativeMethods(void);
+
 private:
     QIODevice::OpenMode rwMode;
     int deviceId;
-    bool hasRegisteredFunctions;
     int jniDataBits;
     int jniStopBits;
     int jniParity;

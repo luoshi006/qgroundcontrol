@@ -1,272 +1,339 @@
-/*=====================================================================
+/****************************************************************************
+ *
+ *   (c) 2009-2016 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
+ *
+ * QGroundControl is licensed according to the terms in the file
+ * COPYING.md in the root of the source code directory.
+ *
+ ****************************************************************************/
 
- QGroundControl Open Source Ground Control Station
-
- (c) 2009 - 2015 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
-
- This file is part of the QGROUNDCONTROL project
-
- QGROUNDCONTROL is free software: you can redistribute it and/or modify
- it under the terms of the GNU General Public License as published by
- the Free Software Foundation, either version 3 of the License, or
- (at your option) any later version.
-
- QGROUNDCONTROL is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU General Public License for more details.
-
- You should have received a copy of the GNU General Public License
- along with QGROUNDCONTROL. If not, see <http://www.gnu.org/licenses/>.
-
- ======================================================================*/
 
 /// @file
 ///     @author Don Gagne <don@thegagnes.com>
 
-import QtQuick 2.3
-import QtQuick.Controls 1.3
-import QtQuick.Controls.Styles 1.2
-import QtQuick.Dialogs 1.2
+import QtQuick                  2.3
+import QtQuick.Controls         1.2
+import QtQuick.Dialogs          1.2
 
-import QGroundControl.Controls 1.0
-import QGroundControl.Palette 1.0
-import QGroundControl.ScreenTools 1.0
-import QGroundControl.Controllers 1.0
-import QGroundControl.FactSystem 1.0
-import QGroundControl.FactControls 1.0
+import QGroundControl               1.0
+import QGroundControl.Controls      1.0
+import QGroundControl.Palette       1.0
+import QGroundControl.ScreenTools   1.0
+import QGroundControl.Controllers   1.0
+import QGroundControl.FactSystem    1.0
+import QGroundControl.FactControls  1.0
 
 QGCView {
-    viewPanel: panel
-
-    /// true: show full information, false: for use in smaller widgets
-    property bool fullMode: true
+    id:         qgcView
+    viewPanel:  panel
 
     QGCPalette { id: __qgcPal; colorGroupEnabled: true }
-    property Fact __editorDialogFact: Fact { }
 
-    readonly property real __leftMargin: 10
-    readonly property real __rightMargin: 20
-    readonly property int __maxParamChars: 16
+    property Fact   _editorDialogFact: Fact { }
+    property int    _rowHeight:         ScreenTools.defaultFontPixelHeight * 2
+    property int    _rowWidth:          10      // Dynamic adjusted at runtime
+    property bool   _searchFilter:      searchText.text != ""   ///< true: showing results of search
+    property var    _searchResults              ///< List of parameter names from search results
+    property bool   _showRCToParam:     !ScreenTools.isMobile && QGroundControl.multiVehicleManager.activeVehicle.px4Firmware
 
     ParameterEditorController {
-        id: controller;
-        factPanel: panel
-
+        id:         controller;
+        factPanel:  panel
         onShowErrorMessage: {
-            showMessage("Parameter Load Errors", errorMsg, StandardButton.Ok)
+            showMessage(qsTr("Parameter Load Errors"), errorMsg, StandardButton.Ok)
+        }
+    }
+
+    QGCViewPanel {
+        id:             panel
+        anchors.fill:   parent
+
+        //---------------------------------------------
+        //-- Header
+        Row {
+            id:             header
+            anchors.left:   parent.left
+            anchors.right:  parent.right
+            spacing:        ScreenTools.defaultFontPixelWidth
+
+            Timer {
+                id:         clearTimer
+                interval:   100;
+                running:    false;
+                repeat:     false
+                onTriggered: {
+                    searchText.text = ""
+                    controller.searchText = ""
+                }
+            }
+
+            QGCLabel {
+                anchors.baseline:   clearButton.baseline
+                text:               qsTr("Search:")
+            }
+
+            QGCTextField {
+                id:                 searchText
+                anchors.baseline:   clearButton.baseline
+                text:               controller.searchText
+                onDisplayTextChanged: controller.searchText = displayText
+            }
+
+            QGCButton {
+                id:         clearButton
+                text:       qsTr("Clear")
+                onClicked: {
+                    if(ScreenTools.isMobile) {
+                        Qt.inputMethod.hide();
+                    }
+                    clearTimer.start()
+                }
+            }
+        } // Row - Header
+
+        QGCButton {
+            anchors.top:    header.top
+            anchors.bottom: header.bottom
+            anchors.right:  parent.right
+            text:           qsTr("Tools")
+            visible:        !_searchFilter
+
+            menu: Menu {
+                MenuItem {
+                    text:           qsTr("Refresh")
+                    onTriggered:	controller.refresh()
+                }
+                MenuItem {
+                    text:           qsTr("Reset all to defaults")
+                    onTriggered:    showDialog(resetToDefaultConfirmComponent, qsTr("Reset All"), qgcView.showDialogDefaultWidth, StandardButton.Cancel | StandardButton.Reset)
+                }
+                MenuSeparator { }
+                MenuItem {
+                    text:           qsTr("Load from file...")
+                    onTriggered: {
+                        var appSettings = QGroundControl.settingsManager.appSettings
+
+                        fileDialog.qgcView =        qgcView
+                        fileDialog.title =          qsTr("Select Parameter File")
+                        fileDialog.selectExisting = true
+                        fileDialog.folder =         appSettings.parameterSavePath
+                        fileDialog.fileExtension =  appSettings.parameterFileExtension
+                        fileDialog.nameFilters =    [ qsTr("Parameter Files (*.%1)").arg(appSettings.parameterFileExtension) , qsTr("All Files (*.*)") ]
+                        fileDialog.openForLoad()
+                    }
+                }
+                MenuItem {
+                    text:           qsTr("Save to file...")
+                    onTriggered: {
+                        var appSettings = QGroundControl.settingsManager.appSettings
+
+                        fileDialog.qgcView =        qgcView
+                        fileDialog.title =          qsTr("Save Parameters")
+                        fileDialog.selectExisting = false
+                        fileDialog.folder =         appSettings.parameterSavePath
+                        fileDialog.fileExtension =  appSettings.parameterFileExtension
+                        fileDialog.nameFilters =    [ qsTr("Parameter Files (*.%1)").arg(appSettings.parameterFileExtension) , qsTr("All Files (*.*)") ]
+                        fileDialog.openForSave()
+                    }
+                }
+                MenuSeparator { visible: _showRCToParam }
+                MenuItem {
+                    text:           qsTr("Clear RC to Param")
+                    onTriggered:	controller.clearRCToParam()
+                    visible:        _showRCToParam
+                }
+                MenuSeparator { }
+                MenuItem {
+                    text:           qsTr("Reboot Vehicle")
+                    onTriggered:    showDialog(rebootVehicleConfirmComponent, qsTr("Reboot Vehicle"), qgcView.showDialogDefaultWidth, StandardButton.Cancel | StandardButton.Ok)
+                }
+            }
+        }
+
+        /// Group buttons
+        QGCFlickable {
+            id :                groupScroll
+            width:              ScreenTools.defaultFontPixelWidth * 25
+            anchors.top:        header.bottom
+            anchors.bottom:     parent.bottom
+            clip:               true
+            pixelAligned:       true
+            contentHeight:      groupedViewComponentColumn.height
+            contentWidth:       groupedViewComponentColumn.width
+            flickableDirection: Flickable.VerticalFlick
+            visible:            !_searchFilter
+
+            Column {
+                id:         groupedViewComponentColumn
+                spacing:    Math.ceil(ScreenTools.defaultFontPixelHeight * 0.25)
+
+                Repeater {
+                    model: controller.componentIds
+
+                    Column {
+                        id:     componentColumn
+                        spacing: Math.ceil(ScreenTools.defaultFontPixelHeight * 0.25)
+
+                        readonly property int componentId: modelData
+
+                        QGCLabel {
+                            text: qsTr("Component #: %1").arg(componentId.toString())
+                            font.family: ScreenTools.demiboldFontFamily
+                            anchors.horizontalCenter: parent.horizontalCenter
+                        }
+
+                        ExclusiveGroup { id: groupGroup }
+
+                        Repeater {
+                            model: controller.getGroupsForComponent(componentId)
+
+                            QGCButton {
+                                width:          ScreenTools.defaultFontPixelWidth * 25
+                                text:           groupName
+                                height:         _rowHeight
+                                exclusiveGroup: setupButtonGroup
+
+                                readonly property string groupName: modelData
+
+                                onClicked: {
+                                    checked = true
+                                    _rowWidth                       = 10
+                                    controller.currentComponentId   = componentId
+                                    controller.currentGroup         = groupName
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        /// Parameter list
+        QGCListView {
+            id:                 editorListView
+            anchors.leftMargin: ScreenTools.defaultFontPixelWidth
+            anchors.left:       _searchFilter ? parent.left : groupScroll.right
+            anchors.right:      parent.right
+            anchors.top:        header.bottom
+            anchors.bottom:     parent.bottom
+            orientation:        ListView.Vertical
+            model:              controller.parameters
+            cacheBuffer:        height > 0 ? height * 2 : 0
+            clip:               true
+
+            delegate: Rectangle {
+                height: _rowHeight
+                width:  _rowWidth
+                color:  Qt.rgba(0,0,0,0)
+
+                Row {
+                    id:     factRow
+                    spacing: Math.ceil(ScreenTools.defaultFontPixelWidth * 0.5)
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    property Fact modelFact: object
+
+                    QGCLabel {
+                        id:     nameLabel
+                        width:  ScreenTools.defaultFontPixelWidth  * 20
+                        text:   factRow.modelFact.name
+                        clip:   true
+                    }
+
+                    QGCLabel {
+                        id:     valueLabel
+                        width:  ScreenTools.defaultFontPixelWidth  * 20
+                        color:  factRow.modelFact.defaultValueAvailable ? (factRow.modelFact.valueEqualsDefault ? __qgcPal.text : __qgcPal.warningText) : __qgcPal.text
+                        text:   factRow.modelFact.enumStrings.length == 0 ? factRow.modelFact.valueString + " " + factRow.modelFact.units : factRow.modelFact.enumStringValue
+                        clip:   true
+                    }
+
+                    QGCLabel {
+                        text:   factRow.modelFact.shortDescription
+                    }
+
+                    Component.onCompleted: {
+                        if(_rowWidth < factRow.width + ScreenTools.defaultFontPixelWidth) {
+                            _rowWidth = factRow.width + ScreenTools.defaultFontPixelWidth
+                        }
+                    }
+                }
+
+                Rectangle {
+                    width:  _rowWidth
+                    height: 1
+                    color:  __qgcPal.text
+                    opacity: 0.15
+                    anchors.bottom: parent.bottom
+                    anchors.left:   parent.left
+                }
+
+                MouseArea {
+                    anchors.fill:       parent
+                    acceptedButtons:    Qt.LeftButton
+                    onClicked: {
+                        _editorDialogFact = factRow.modelFact
+                        showDialog(editorDialogComponent, qsTr("Parameter Editor"), qgcView.showDialogDefaultWidth, StandardButton.Cancel | StandardButton.Save)
+                    }
+                }
+            }
+        }
+    } // QGCViewPanel
+
+    QGCFileDialog {
+        id: fileDialog
+
+        onAcceptedForSave: {
+            controller.saveToFile(file)
+            close()
+        }
+
+        onAcceptedForLoad: {
+            controller.loadFromFile(file)
+            close()
         }
     }
 
     Component {
         id: editorDialogComponent
 
-        ParameterEditorDialog { fact: __editorDialogFact }
-    } // Component - Editor Dialog
+        ParameterEditorDialog {
+            fact:           _editorDialogFact
+            showRCToParam:  _showRCToParam
+        }
+    }
 
     Component {
-        id: factRowsComponent
+        id: resetToDefaultConfirmComponent
 
-        Column {
-            id:     factColumn
-            x:      __leftMargin
+        QGCViewDialog {
+            function accept() {
+                controller.resetAllToDefaults()
+                hideDialog()
+            }
 
             QGCLabel {
-                text:               group
-                verticalAlignment:	Text.AlignVCenter
-                font.pixelSize:     ScreenTools.mediumFontPixelSize
+                width:              parent.width
+                wrapMode:           Text.WordWrap
+                text:               qsTr("Select Reset to reset all parameters to their defaults.")
+            }
+        }
+    }
+
+    Component {
+        id: rebootVehicleConfirmComponent
+
+        QGCViewDialog {
+            function accept() {
+                QGroundControl.multiVehicleManager.activeVehicle.rebootVehicle()
+                hideDialog()
             }
 
-            Rectangle {
-                width:  parent.width
-                height: 1
-                color:  __qgcPal.text
+            QGCLabel {
+                width:              parent.width
+                wrapMode:           Text.WordWrap
+                text:               qsTr("Select Ok to reboot vehicle.")
             }
-
-            Repeater {
-                model: controller.getFactsForGroup(componentId, group)
-
-                Column {
-                    property Fact modelFact: controller.getParameterFact(componentId, modelData)
-
-                    Item {
-                        x:			__leftMargin
-                        width:      parent.width
-                        height:		ScreenTools.defaultFontPixelSize * 1.75
-
-                        QGCLabel {
-                            id:                 nameLabel
-                            width:              defaultTextWidth * (__maxParamChars + 1)
-                            height:             parent.height
-                            verticalAlignment:	Text.AlignVCenter
-                            text:               modelFact.name
-                        }
-
-                        QGCLabel {
-                            id:                 valueLabel
-                            width:              defaultTextWidth * 20
-                            height:             parent.height
-                            anchors.left:       nameLabel.right
-                            verticalAlignment:	Text.AlignVCenter
-                            color:              modelFact.valueEqualsDefault ? __qgcPal.text : "orange"
-                            text:               modelFact.valueString + " " + modelFact.units
-                        }
-
-                        QGCLabel {
-                            height:             parent.height
-                            anchors.left:       valueLabel.right
-                            verticalAlignment:	Text.AlignVCenter
-                            visible:            fullMode
-                            text:               modelFact.shortDescription
-                        }
-
-                        MouseArea {
-                            anchors.fill:       parent
-                             acceptedButtons:   Qt.LeftButton
-
-                            onClicked: {
-                                __editorDialogFact = modelFact
-                                showDialog(editorDialogComponent, "Parameter Editor", fullMode ? 50 : -1, StandardButton.Cancel | StandardButton.Save)
-                            }
-                        }
-                    }
-
-                    Rectangle {
-                        x:      __leftMargin
-                        width:  factColumn.width - __leftMargin - __rightMargin
-                        height: 1
-                        color:  __qgcPal.windowShade
-                    }
-                } // Column - Fact
-            } // Repeater - Facts
-        } // Column - Facts
-    } // Component - factRowsComponent
-
-    QGCViewPanel {
-        id:             panel
-        anchors.fill:   parent
-
-
-        Column {
-            anchors.fill: parent
-
-            Item {
-                width:  parent.width
-                height: firstButton.height
-
-                QGCLabel {
-                    font.pixelSize: ScreenTools.largeFontPixelSize
-                    visible:        fullMode
-                    text:           "PARAMETER EDITOR"
-                }
-
-                Row {
-                    spacing:            10
-                    layoutDirection:    Qt.RightToLeft
-                    width:              parent.width
-
-                    QGCButton {
-                        text:		"Clear RC to Param"
-                        onClicked:	controller.clearRCToParam()
-                    }
-                    QGCButton {
-                        text:		"Save to file"
-                        visible:	fullMode
-                        onClicked:	controller.saveToFile()
-                    }
-                    QGCButton {
-                        text:		"Load from file"
-                        visible:	fullMode
-                        onClicked:	controller.loadFromFile()
-                    }
-                    QGCButton {
-                        id:			firstButton
-                        text:		"Refresh"
-                        onClicked:	controller.refresh()
-                    }
-                }
-            }
-
-            Item {
-                id:		lastSpacer
-                height: 10
-                width:	5
-            }
-
-            Item {
-                width:  parent.width
-                height: parent.height - (lastSpacer.y + lastSpacer.height)
-
-                ScrollView {
-                    id :	groupScroll
-                    width:	defaultTextWidth * 25
-                    height: parent.height
-
-                    Column {
-                        Repeater {
-                            model: controller.componentIds
-
-                            Column {
-                                id: componentColumn
-
-                                readonly property int componentId: parseInt(modelData)
-
-                                QGCLabel {
-                                    height:				contentHeight + (ScreenTools.defaultFontPixelHeight * 0.5)
-                                    text:               "Component #: " + componentId.toString()
-                                    verticalAlignment:	Text.AlignVCenter
-                                    font.pixelSize:     ScreenTools.mediumFontPixelSize
-                                }
-
-                                Repeater {
-                                    model: controller.getGroupsForComponent(componentColumn.componentId)
-
-                                    Column {
-                                        QGCButton {
-                                            x:		__leftMargin
-                                            width: groupScroll.width - __leftMargin - __rightMargin
-                                            text:	modelData
-
-                                            onClicked: {
-                                                factRowsLoader.sourceComponent = null
-                                                factRowsLoader.componentId = componentId
-                                                factRowsLoader.group = modelData
-                                                factRowsLoader.sourceComponent = factRowsComponent
-                                            }
-                                        }
-
-                                        Item {
-                                            width:  1
-                                            height: ScreenTools.defaultFontPixelSize * 0.25
-                                        }
-                                    } // Column - Group
-                                } // Repeater - Groups
-
-                                Item {
-                                    height: 10
-                                    width:	10
-                                }
-                            } // Column - Component
-                        } // Repeater - Components
-                    } // Column - Component
-                } // ScrollView - Groups
-
-                ScrollView {
-                    id:             factScrollView
-                    anchors.left:   groupScroll.right
-                    anchors.right:  parent.right
-                    height:         parent.height
-
-                    Loader {
-                        id:     factRowsLoader
-                        width:  factScrollView.width
-
-                        property int componentId:   controller.componentIds[0]
-                        property string group:      controller.getGroupsForComponent(controller.componentIds[0])[0]
-                        sourceComponent:            factRowsComponent
-                    }
-                } // ScrollView - Facts
-            } // Item - Group ScrollView + Facts
-        } // Column - Outer
-    } // QGCViewPanel
+        }
+    }
 } // QGCView

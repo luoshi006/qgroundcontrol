@@ -1,30 +1,17 @@
-/*=====================================================================
- 
- QGroundControl Open Source Ground Control Station
- 
- (c) 2009 - 2014 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
- 
- This file is part of the QGROUNDCONTROL project
- 
- QGROUNDCONTROL is free software: you can redistribute it and/or modify
- it under the terms of the GNU General Public License as published by
- the Free Software Foundation, either version 3 of the License, or
- (at your option) any later version.
- 
- QGROUNDCONTROL is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU General Public License for more details.
- 
- You should have received a copy of the GNU General Public License
- along with QGROUNDCONTROL. If not, see <http://www.gnu.org/licenses/>.
- 
- ======================================================================*/
+/****************************************************************************
+ *
+ *   (c) 2009-2016 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
+ *
+ * QGroundControl is licensed according to the terms in the file
+ * COPYING.md in the root of the source code directory.
+ *
+ ****************************************************************************/
 
 #include "FactPanelController.h"
-#include "UASManager.h"
-#include "AutoPilotPluginManager.h"
-#include "QGCMessageBox.h"
+#include "MultiVehicleManager.h"
+#include "UAS.h"
+#include "QGCApplication.h"
+#include "ParameterManager.h"
 
 #include <QQmlEngine>
 
@@ -33,21 +20,25 @@
 
 QGC_LOGGING_CATEGORY(FactPanelControllerLog, "FactPanelControllerLog")
 
-FactPanelController::FactPanelController(void) :
-	_autopilot(NULL),
-    _factPanel(NULL)
+FactPanelController::FactPanelController(bool standaloneUnitTesting)
+    : _vehicle(NULL)
+    , _uas(NULL)
+    , _autopilot(NULL)
+    , _factPanel(NULL)
 {
-    // FIXME: Get rid of these asserts
-    
-    _uas = UASManager::instance()->getActiveUAS();
-    Q_ASSERT(_uas);
-    
-    _autopilot = AutoPilotPluginManager::instance()->getInstanceForAutoPilotPlugin(_uas);
-    Q_ASSERT(_autopilot);
-    Q_ASSERT(_autopilot->pluginReady());
-    
-    // Do a delayed check for the _factPanel finally being set correctly from Qml
-    QTimer::singleShot(1000, this, &FactPanelController::_checkForMissingFactPanel);
+    _vehicle = qgcApp()->toolbox()->multiVehicleManager()->activeVehicle();
+
+    if (_vehicle) {
+        _uas = _vehicle->uas();
+        _autopilot = _vehicle->autopilotPlugin();
+    } else {
+        _vehicle = qgcApp()->toolbox()->multiVehicleManager()->offlineEditingVehicle();
+    }
+
+    if (!standaloneUnitTesting) {
+        // Do a delayed check for the _factPanel finally being set correctly from Qml
+        QTimer::singleShot(1000, this, &FactPanelController::_checkForMissingFactPanel);
+    }
 }
 
 QQuickItem* FactPanelController::factPanel(void)
@@ -59,9 +50,9 @@ void FactPanelController::setFactPanel(QQuickItem* panel)
 {
     // Once we finally have the _factPanel member set, send any
     // missing fact notices that were waiting to go out
-    
+
     _factPanel = panel;
-    foreach (QString missingParam, _delayedMissingParams) {
+    foreach (const QString &missingParam, _delayedMissingParams) {
         _notifyPanelMissingParameter(missingParam);
     }
     _delayedMissingParams.clear();
@@ -94,9 +85,9 @@ void FactPanelController::_notifyPanelErrorMsg(const QString& errorMsg)
 void FactPanelController::_reportMissingParameter(int componentId, const QString& name)
 {
     qgcApp()->reportMissingParameter(componentId, name);
-    
+
     QString missingParam = QString("%1:%2").arg(componentId).arg(name);
-    
+
     // If missing parameters a reported from the constructor of a derived class we
     // will not have access to _factPanel yet. Just record list of missing facts
     // in that case instead of notify. Once _factPanel is available they will be
@@ -111,14 +102,14 @@ void FactPanelController::_reportMissingParameter(int componentId, const QString
 bool FactPanelController::_allParametersExists(int componentId, QStringList names)
 {
     bool noMissingFacts = true;
-    
-    foreach (QString name, names) {
-        if (!_autopilot->parameterExists(componentId, name)) {
+
+    foreach (const QString &name, names) {
+        if (_vehicle && !_vehicle->parameterManager()->parameterExists(componentId, name)) {
             _reportMissingParameter(componentId, name);
             noMissingFacts = false;
         }
     }
-    
+
     return noMissingFacts;
 }
 
@@ -129,26 +120,28 @@ void FactPanelController::_checkForMissingFactPanel(void)
     }
 }
 
-Fact* FactPanelController::getParameterFact(int componentId, const QString& name)
+Fact* FactPanelController::getParameterFact(int componentId, const QString& name, bool reportMissing)
 {
-    if (_autopilot->parameterExists(componentId, name)) {
-        Fact* fact = _autopilot->getParameterFact(componentId, name);
+    if (_vehicle && _vehicle->parameterManager()->parameterExists(componentId, name)) {
+        Fact* fact = _vehicle->parameterManager()->getParameter(componentId, name);
         QQmlEngine::setObjectOwnership(fact, QQmlEngine::CppOwnership);
         return fact;
     } else {
-        _reportMissingParameter(componentId, name);
+        if (reportMissing) {
+            _reportMissingParameter(componentId, name);
+        }
         return NULL;
     }
 }
 
 bool FactPanelController::parameterExists(int componentId, const QString& name)
 {
-    return _autopilot->parameterExists(componentId, name);
+    return _vehicle ? _vehicle->parameterManager()->parameterExists(componentId, name) : false;
 }
 
 void FactPanelController::_showInternalError(const QString& errorMsg)
 {
     _notifyPanelErrorMsg(QString("Internal Error: %1").arg(errorMsg));
     qCWarning(FactPanelControllerLog) << "Internal Error" << errorMsg;
-    QGCMessageBox::critical("Internal Error", errorMsg);
+    qgcApp()->showMessage(errorMsg);
 }

@@ -1,25 +1,12 @@
-/*=====================================================================
+/****************************************************************************
+ *
+ *   (c) 2009-2016 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
+ *
+ * QGroundControl is licensed according to the terms in the file
+ * COPYING.md in the root of the source code directory.
+ *
+ ****************************************************************************/
 
-PIXHAWK Micro Air Vehicle Flying Robotics Toolkit
-
-(c) 2009, 2010 PIXHAWK PROJECT  <http://pixhawk.ethz.ch>
-
-This file is part of the PIXHAWK project
-
-    PIXHAWK is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
-
-    PIXHAWK is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with PIXHAWK. If not, see <http://www.gnu.org/licenses/>.
-
-======================================================================*/
 
 /**
  * @file
@@ -38,20 +25,23 @@ This file is part of the PIXHAWK project
 #include <QStringList>
 
 #include "QGCAudioWorker.h"
-#include "QGCSingleton.h"
+#include "QGCToolbox.h"
+
+class QGCApplication;
 
 /**
  * @brief Audio Output (speech synthesizer and "beep" output)
  * This class follows the singleton design pattern
  * @see http://en.wikipedia.org/wiki/Singleton_pattern
  */
-class GAudioOutput : public QGCSingleton
+class GAudioOutput : public QGCTool
 {
     Q_OBJECT
-    
-    DECLARE_QGC_SINGLETON(GAudioOutput, GAudioOutput)
-    
+
 public:
+    GAudioOutput(QGCApplication* app, QGCToolbox* toolbox);
+    ~GAudioOutput();
+
     /** @brief List available voices */
     QStringList listVoices(void);
     enum
@@ -72,34 +62,19 @@ public:
         AUDIO_SEVERITY_DEBUG = 7
     };
 
-    /** @brief Get the mute state */
-    bool isMuted();
-
 public slots:
-    /** @brief Say this text if current output priority matches */
-    bool say(QString text, int severity = 6);
-    /** @brief Play alert sound and say notification message */
-    bool alert(QString text);
-    /** @brief Play emergency sound once */
-    void beep();
-    /** @brief Mute/unmute sound */
-    void mute(bool mute);
+    /** @brief Say this text */
+    bool say(const QString& text);
 
 signals:
-    void mutedChanged(bool);
-    bool textToSpeak(QString text, int severity = 1);
+    bool textToSpeak(QString text);
     void beepOnce();
 
 protected:
-    bool muted;
+#if !defined __android__
     QThread* thread;
     QGCAudioWorker* worker;
-    
-private:
-    GAudioOutput(QObject *parent = NULL);
-    ~GAudioOutput();
-    
-    static const char* _mutedKey;
+#endif
 };
 
 #endif // AUDIOOUTPUT_H

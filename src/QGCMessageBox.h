@@ -1,37 +1,27 @@
-/*=====================================================================
+/****************************************************************************
+ *
+ *   (c) 2009-2016 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
+ *
+ * QGroundControl is licensed according to the terms in the file
+ * COPYING.md in the root of the source code directory.
+ *
+ ****************************************************************************/
 
- QGroundControl Open Source Ground Control Station
-
- (c) 2009 - 2014 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
-
- This file is part of the QGROUNDCONTROL project
-
- QGROUNDCONTROL is free software: you can redistribute it and/or modify
- it under the terms of the GNU General Public License as published by
- the Free Software Foundation, either version 3 of the License, or
- (at your option) any later version.
-
- QGROUNDCONTROL is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU General Public License for more details.
-
- You should have received a copy of the GNU General Public License
- along with QGROUNDCONTROL. If not, see <http://www.gnu.org/licenses/>.
-
- ======================================================================*/
 
 #ifndef QGCMESSAGEBOX_H
 #define QGCMESSAGEBOX_H
+
+#ifdef __mobile__
+#error Should not be included in mobile builds
+#endif
 
 #include <QMessageBox>
 
 #include "MainWindow.h"
 #include "QGCApplication.h"
-#ifdef QT_DEBUG
-#ifndef __mobile__
-#include "UnitTest.h"
-#endif
+
+#ifdef UNITTEST_BUILD
+    #include "UnitTest.h"
 #endif
 
 /// @file
@@ -57,7 +47,7 @@ public:
         { return _messageBox(QMessageBox::Warning, title, text, buttons, defaultButton, parent); }
 
 private slots:
-    /// @brief The exec slot is private becasue when only want QGCMessageBox users to use the static methods. Otherwise it will break
+    /// @brief The exec slot is private because when only want QGCMessageBox users to use the static methods. Otherwise it will break
     ///         unit testing.
     int exec(void) { return QMessageBox::exec(); }
 
@@ -99,22 +89,20 @@ private:
         parent = _validateParameters(buttons, &defaultButton, parent);
 
         if (MainWindow::instance()) {
-            MainWindow::instance()->hideSplashScreen();
             if (parent == NULL) {
                 parent = MainWindow::instance();
             }
         }
 
-#ifdef QT_DEBUG
-#ifndef __mobile__
+        qDebug() << "QGCMessageBox (unit testing)" << title << text;
+
+#ifdef UNITTEST_BUILD
         if (qgcApp()->runningUnitTests()) {
-            qDebug() << "QGCMessageBox (unit testing)" << title << text;
             return UnitTest::_messageBox(icon, title, text, buttons, defaultButton);
         } else
 #endif
-#endif
         {
-#ifdef Q_OS_MAC
+#ifdef __macos__
             QString emptyTitle;
             QMessageBox box(icon, emptyTitle, title, buttons, parent);
             box.setDefaultButton(defaultButton);

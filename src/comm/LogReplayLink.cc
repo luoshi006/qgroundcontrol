@@ -1,28 +1,16 @@
-/*=====================================================================
+/****************************************************************************
+ *
+ *   (c) 2009-2016 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
+ *
+ * QGroundControl is licensed according to the terms in the file
+ * COPYING.md in the root of the source code directory.
+ *
+ ****************************************************************************/
 
- QGroundControl Open Source Ground Control Station
-
- (c) 2009 - 2015 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
-
- This file is part of the QGROUNDCONTROL project
-
- QGROUNDCONTROL is free software: you can redistribute it and/or modify
- it under the terms of the GNU General Public License as published by
- the Free Software Foundation, either version 3 of the License, or
- (at your option) any later version.
-
- QGROUNDCONTROL is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU General Public License for more details.
-
- You should have received a copy of the GNU General Public License
- along with QGROUNDCONTROL. If not, see <http://www.gnu.org/licenses/>.
-
- ======================================================================*/
 
 #include "LogReplayLink.h"
 #include "LinkManager.h"
+#include "QGCApplication.h"
 
 #include <QFileInfo>
 #include <QtEndian>
@@ -76,12 +64,13 @@ QString LogReplayLinkConfiguration::logFilenameShort(void)
     return fi.fileName();
 }
 
-LogReplayLink::LogReplayLink(LogReplayLinkConfiguration* config) :
-    _connected(false),
-    _replayAccelerationFactor(1.0f)
+LogReplayLink::LogReplayLink(SharedLinkConfigurationPointer& config)
+    : LinkInterface(config)
+    , _logReplayConfig(qobject_cast<LogReplayLinkConfiguration*>(config.data()))
+    , _connected(false)
+    , _replayAccelerationFactor(1.0f)
 {
-    Q_ASSERT(config);
-    _config = config;
+    Q_ASSERT(_logReplayConfig);
     
     _readTickTimer.moveToThread(this);
     
@@ -101,7 +90,7 @@ LogReplayLink::~LogReplayLink(void)
 bool LogReplayLink::_connect(void)
 {
     // Disallow replay when any links are connected
-    if (LinkManager::instance()->anyConnectedLinks()) {
+    if (qgcApp()->toolbox()->multiVehicleManager()->activeVehicle()) {
         emit communicationError(_errorTitle, "You must close all connections prior to replaying a log.");
         return false;
     }
@@ -114,7 +103,7 @@ bool LogReplayLink::_connect(void)
     return true;
 }
 
-bool LogReplayLink::_disconnect(void)
+void LogReplayLink::_disconnect(void)
 {
     if (_connected) {
         quit();
@@ -122,7 +111,6 @@ bool LogReplayLink::_disconnect(void)
         _connected = false;
         emit disconnected();
     }
-    return true;
 }
 
 void LogReplayLink::run(void)
@@ -140,6 +128,8 @@ void LogReplayLink::run(void)
 
     // Run normal event loop until exit
     exec();
+    
+    _readTickTimer.stop();
 }
 
 void LogReplayLink::_replayError(const QString& errorMsg)
@@ -148,16 +138,10 @@ void LogReplayLink::_replayError(const QString& errorMsg)
     emit communicationError(_errorTitle, errorMsg);
 }
 
-void LogReplayLink::readBytes(void)
-{
-    // FIXME: This is a bad virtual from LinkInterface?
-}
-
 /// Since this is log replay, we just drops writes on the floor
-void LogReplayLink::writeBytes(const char* bytes, qint64 cBytes)
+void LogReplayLink::_writeBytes(const QByteArray bytes)
 {
     Q_UNUSED(bytes);
-    Q_UNUSED(cBytes);
 }
 
 /// Parses a BigEndian quint64 timestamp
@@ -176,7 +160,7 @@ quint64 LogReplayLink::_parseTimestamp(const QByteArray& bytes)
     return timestamp;
 }
 
-/// Seeks to the beginning of the next successully parsed mavlink message in the log file.
+/// Seeks to the beginning of the next successfully parsed mavlink message in the log file.
 ///     @param nextMsg[output] Parsed next message that was found
 /// @return A Unix timestamp in microseconds UTC for found message or 0 if parsing failed
 quint64 LogReplayLink::_seekToNextMavlinkMessage(mavlink_message_t* nextMsg)
@@ -184,7 +168,7 @@ quint64 LogReplayLink::_seekToNextMavlinkMessage(mavlink_message_t* nextMsg)
     char nextByte;
     mavlink_status_t comm;
     while (_logFile.getChar(&nextByte)) { // Loop over every byte
-        bool messageFound = mavlink_parse_char(getMavlinkChannel(), nextByte, nextMsg, &comm);
+        bool messageFound = mavlink_parse_char(mavlinkChannel(), nextByte, nextMsg, &comm);
         
         // If we've found a message, jump back to the start of the message, grab the timestamp,
         // and go back to the end of this file.
@@ -201,7 +185,7 @@ quint64 LogReplayLink::_seekToNextMavlinkMessage(mavlink_message_t* nextMsg)
 bool LogReplayLink::_loadLogFile(void)
 {
     QString errorMsg;
-    QString logFilename = _config->logFilename();
+    QString logFilename = _logReplayConfig->logFilename();
     QFileInfo logFileInfo;
     int logDurationSecondsTotal;
     
@@ -218,7 +202,7 @@ bool LogReplayLink::_loadLogFile(void)
     logFileInfo.setFile(logFilename);
     _logFileSize = logFileInfo.size();
     
-    _logTimestamped = logFilename.endsWith(".mavlink");
+    _logTimestamped = logFilename.endsWith(".tlog");
     
     if (_logTimestamped) {
         // Get the first timestamp from the log
@@ -363,9 +347,10 @@ void LogReplayLink::_readNextLogEntry(void)
 
 void LogReplayLink::_play(void)
 {
-    // FIXME: With move to link I don't think this is needed any more? Except for the replay widget handling multi-uas?
-    LinkManager::instance()->setConnectionsSuspended(tr("Connect not allowed during Flight Data replay."));
-    MAVLinkProtocol::instance()->suspendLogForReplay(true);
+    qgcApp()->toolbox()->linkManager()->setConnectionsSuspended(tr("Connect not allowed during Flight Data replay."));
+#ifndef __mobile__
+    qgcApp()->toolbox()->mavlinkProtocol()->suspendLogForReplay(true);
+#endif
     
     // Make sure we aren't at the end of the file, if we are, reset to the beginning and play from there.
     if (_logFile.atEnd()) {
@@ -394,8 +379,10 @@ void LogReplayLink::_play(void)
 
 void LogReplayLink::_pause(void)
 {
-    LinkManager::instance()->setConnectionsAllowed();
-    MAVLinkProtocol::instance()->suspendLogForReplay(false);
+    qgcApp()->toolbox()->linkManager()->setConnectionsAllowed();
+#ifndef __mobile__
+    qgcApp()->toolbox()->mavlinkProtocol()->suspendLogForReplay(false);
+#endif
     
     _readTickTimer.stop();
     

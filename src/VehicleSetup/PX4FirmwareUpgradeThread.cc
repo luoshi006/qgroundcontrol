@@ -1,38 +1,23 @@
-/*=====================================================================
- 
- QGroundControl Open Source Ground Control Station
- 
- (c) 2009, 2014 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
- 
- This file is part of the QGROUNDCONTROL project
- 
- QGROUNDCONTROL is free software: you can redistribute it and/or modify
- it under the terms of the GNU General Public License as published by
- the Free Software Foundation, either version 3 of the License, or
- (at your option) any later version.
- 
- QGROUNDCONTROL is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU General Public License for more details.
- 
- You should have received a copy of the GNU General Public License
- along with QGROUNDCONTROL. If not, see <http://www.gnu.org/licenses/>.
- 
- ======================================================================*/
+/****************************************************************************
+ *
+ *   (c) 2009-2016 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
+ *
+ * QGroundControl is licensed according to the terms in the file
+ * COPYING.md in the root of the source code directory.
+ *
+ ****************************************************************************/
+
 
 /// @file
-///     @brief PX4 Firmware Upgrade operations which occur on a seperate thread.
+///     @brief PX4 Firmware Upgrade operations which occur on a separate thread.
 ///     @author Don Gagne <don@thegagnes.com>
 
 #include "PX4FirmwareUpgradeThread.h"
 #include "Bootloader.h"
 #include "QGCLoggingCategory.h"
 #include "QGC.h"
-#include "SerialPortIds.h"
 
 #include <QTimer>
-#include <QSerialPortInfo>
 #include <QDebug>
 #include <QSerialPort>
 
@@ -97,18 +82,19 @@ void PX4FirmwareUpgradeThreadWorker::_startFindBoardLoop(void)
 
 void PX4FirmwareUpgradeThreadWorker::_findBoardOnce(void)
 {
-    qCDebug(FirmwareUpgradeLog) << "_findBoardOnce";
+    qCDebug(FirmwareUpgradeVerboseLog) << "_findBoardOnce";
     
-    QSerialPortInfo                     portInfo;
-    PX4FirmwareUpgradeFoundBoardType_t  boardType;
+    QGCSerialPortInfo               portInfo;
+    QGCSerialPortInfo::BoardType_t  boardType;
+    QString                         boardName;
     
-    if (_findBoardFromPorts(portInfo, boardType)) {
+    if (_findBoardFromPorts(portInfo, boardType, boardName)) {
         if (!_foundBoard) {
             _foundBoard = true;
             _foundBoardPortInfo = portInfo;
-            emit foundBoard(_findBoardFirstAttempt, portInfo, boardType);
+            emit foundBoard(_findBoardFirstAttempt, portInfo, boardType, boardName);
             if (!_findBoardFirstAttempt) {
-                if (boardType == FoundBoard3drRadio) {
+                if (boardType == QGCSerialPortInfo::BoardTypeSiKRadio) {
                     _3drRadioForceBootloader(portInfo);
                     return;
                 } else {
@@ -131,63 +117,21 @@ void PX4FirmwareUpgradeThreadWorker::_findBoardOnce(void)
     _timerRetry->start();
 }
 
-bool PX4FirmwareUpgradeThreadWorker::_findBoardFromPorts(QSerialPortInfo& portInfo, PX4FirmwareUpgradeFoundBoardType_t& type)
+bool PX4FirmwareUpgradeThreadWorker::_findBoardFromPorts(QGCSerialPortInfo& portInfo, QGCSerialPortInfo::BoardType_t& boardType, QString& boardName)
 {
-    bool found = false;
-    
-    foreach (QSerialPortInfo info, QSerialPortInfo::availablePorts()) {
-        qCDebug(FirmwareUpgradeLog) << "Serial Port --------------";
-        qCDebug(FirmwareUpgradeLog) << "\tport name:" << info.portName();
-        qCDebug(FirmwareUpgradeLog) << "\tdescription:" << info.description();
-        qCDebug(FirmwareUpgradeLog) << "\tsystem location:" << info.systemLocation();
-        qCDebug(FirmwareUpgradeLog) << "\tvendor ID:" << info.vendorIdentifier();
-        qCDebug(FirmwareUpgradeLog) << "\tproduct ID:" << info.productIdentifier();
+    foreach (QGCSerialPortInfo info, QGCSerialPortInfo::availablePorts()) {
+        info.getBoardInfo(boardType, boardName);
+
+        qCDebug(FirmwareUpgradeVerboseLog) << "Serial Port --------------";
+        qCDebug(FirmwareUpgradeVerboseLog) << "\tboard type" << boardType;
+        qCDebug(FirmwareUpgradeVerboseLog) << "\tboard name" << boardName;
+        qCDebug(FirmwareUpgradeVerboseLog) << "\tport name:" << info.portName();
+        qCDebug(FirmwareUpgradeVerboseLog) << "\tdescription:" << info.description();
+        qCDebug(FirmwareUpgradeVerboseLog) << "\tsystem location:" << info.systemLocation();
+        qCDebug(FirmwareUpgradeVerboseLog) << "\tvendor ID:" << info.vendorIdentifier();
+        qCDebug(FirmwareUpgradeVerboseLog) << "\tproduct ID:" << info.productIdentifier();
         
-        if (!info.portName().isEmpty()) {
-            switch (info.vendorIdentifier()) {
-                case SerialPortIds::px4VendorId:
-                    if (info.productIdentifier() == SerialPortIds::pixhawkFMUV2ProductId || info.productIdentifier() == SerialPortIds::pixhawkFMUV2OldBootloaderProductId) {
-                        qCDebug(FirmwareUpgradeLog) << "Found PX4 FMU V2";
-                        type = FoundBoardPX4FMUV2;
-                        found = true;
-                    } else if (info.productIdentifier() == SerialPortIds::pixhawkFMUV1ProductId) {
-                        qCDebug(FirmwareUpgradeLog) << "Found PX4 FMU V1";
-                        type = FoundBoardPX4FMUV1;
-                        found = true;
-                    } else if (info.productIdentifier() == SerialPortIds::px4FlowProductId) {
-                        qCDebug(FirmwareUpgradeLog) << "Found PX4 Flow";
-                        type = FoundBoardPX4Flow;
-                        found = true;
-                    } else if (info.productIdentifier() == SerialPortIds::AeroCoreProductId) {
-                        qCDebug(FirmwareUpgradeLog) << "Found AeroCore";
-                        type = FoundBoardAeroCore;
-                        found = true;
-                    }
-                    break;
-                case SerialPortIds::threeDRRadioVendorId:
-                    if (info.productIdentifier() == SerialPortIds::threeDRRadioProductId) {
-                        qCDebug(FirmwareUpgradeLog) << "Found 3DR Radio";
-                        type = FoundBoard3drRadio;
-                        found = true;
-                    }
-                    break;
-            }
-            if (!found) {
-                // Fall back to port name matching which could lead to incorrect board mapping. But in some cases the
-                // vendor and product id do not come through correctly so this is used as a last chance detection method.
-                if (info.description() == "PX4 FMU v2.x" || info.description() == "PX4 BL FMU v2.x") {
-                    qCDebug(FirmwareUpgradeLog) << "Found PX4 FMU V2 (by name matching fallback)";
-                    type = FoundBoardPX4FMUV2;
-                    found = true;
-                } else if (info.description() == "PX4 FMU v1.x" || info.description() == "PX4 BL FMU v1.x") {
-                    qCDebug(FirmwareUpgradeLog) << "Found PX4 FMU V1 (by name matching fallback)";
-                    type = FoundBoardPX4FMUV1;
-                    found = true;
-                }
-            }
-        }
-        
-        if (found) {
+        if (info.canFlash()) {
             portInfo = info;
             return true;
         }
@@ -196,7 +140,7 @@ bool PX4FirmwareUpgradeThreadWorker::_findBoardFromPorts(QSerialPortInfo& portIn
     return false;
 }
 
-void PX4FirmwareUpgradeThreadWorker::_3drRadioForceBootloader(const QSerialPortInfo& portInfo)
+void PX4FirmwareUpgradeThreadWorker::_3drRadioForceBootloader(const QGCSerialPortInfo& portInfo)
 {
     // First make sure we can't get the bootloader
     
@@ -213,13 +157,8 @@ void PX4FirmwareUpgradeThreadWorker::_3drRadioForceBootloader(const QSerialPortI
     emit status("Putting radio into command mode");
     
     // Wait a little while for the USB port to initialize. 3DR Radio boot is really slow.
-    for (int i=0; i<12; i++) {
-        if (port.open(QIODevice::ReadWrite)) {
-            break;
-        } else {
-            QGC::SLEEP::msleep(250);
-        }
-    }
+    QGC::SLEEP::msleep(2000);
+    port.open(QIODevice::ReadWrite);
     
     if (!port.isOpen()) {
         emit error(QString("Unable to open port: %1 error: %2").arg(portInfo.systemLocation()).arg(port.errorString()));
@@ -227,6 +166,7 @@ void PX4FirmwareUpgradeThreadWorker::_3drRadioForceBootloader(const QSerialPortI
     }
 
     // Put radio into command mode
+    QGC::SLEEP::msleep(2000);
     port.write("+++", 3);
     if (!port.waitForReadyRead(1500)) {
         emit error("Unable to put radio into command mode");
@@ -234,6 +174,7 @@ void PX4FirmwareUpgradeThreadWorker::_3drRadioForceBootloader(const QSerialPortI
     }
     QByteArray bytes = port.readAll();
     if (!bytes.contains("OK")) {
+        qCDebug(FirmwareUpgradeLog) << bytes;
         emit error("Unable to put radio into command mode");
         return;
     }
@@ -242,20 +183,24 @@ void PX4FirmwareUpgradeThreadWorker::_3drRadioForceBootloader(const QSerialPortI
     
     port.write("AT&UPDATE\r\n");
     if (!port.waitForBytesWritten(1500)) {
-        emit error("Unable to reboot radio");
+        emit error("Unable to reboot radio (bytes written)");
         return;
     }
-    QGC::SLEEP::msleep(2000);
+    if (!port.waitForReadyRead(1500)) {
+        emit error("Unable to reboot radio (ready read)");
+        return;
+    }
     port.close();
-    
+    QGC::SLEEP::msleep(2000);
+
     // The bootloader should be waiting for us now
     
     _findBootloader(portInfo, true /* radio mode */, true /* errorOnNotFound */);
 }
 
-bool PX4FirmwareUpgradeThreadWorker::_findBootloader(const QSerialPortInfo& portInfo, bool radioMode, bool errorOnNotFound)
+bool PX4FirmwareUpgradeThreadWorker::_findBootloader(const QGCSerialPortInfo& portInfo, bool radioMode, bool errorOnNotFound)
 {
-    qCDebug(FirmwareUpgradeLog) << "_findBootloader";
+    qCDebug(FirmwareUpgradeLog) << "_findBootloader" << portInfo.systemLocation();
     
     uint32_t bootloaderVersion = 0;
     uint32_t boardID;
@@ -263,17 +208,35 @@ bool PX4FirmwareUpgradeThreadWorker::_findBootloader(const QSerialPortInfo& port
 
     
     _bootloaderPort = new QextSerialPort(QextSerialPort::Polling);
-    Q_CHECK_PTR(_bootloaderPort);
-    
+    if (radioMode) {
+        _bootloaderPort->setBaudRate(BAUD115200);
+    }
+
     // Wait a little while for the USB port to initialize.
+    bool openFailed = true;
     for (int i=0; i<10; i++) {
         if (_bootloader->open(_bootloaderPort, portInfo.systemLocation())) {
+            openFailed = false;
             break;
         } else {
             QGC::SLEEP::msleep(100);
         }
     }
     
+    if (radioMode) {
+        QGC::SLEEP::msleep(2000);
+    }
+
+    if (openFailed) {
+        qCDebug(FirmwareUpgradeLog) << "Bootloader open port failed:" << _bootloader->errorString();
+        if (errorOnNotFound) {
+            emit error(_bootloader->errorString());
+        }
+        _bootloaderPort->deleteLater();
+        _bootloaderPort = NULL;
+        return false;
+    }
+
     if (_bootloader->sync(_bootloaderPort)) {
         bool success;
         
@@ -326,6 +289,7 @@ void PX4FirmwareUpgradeThreadWorker::_flash(void)
             _bootloaderPort = NULL;
             qCDebug(FirmwareUpgradeLog) << "Program failed:" << _bootloader->errorString();
             emit error(_bootloader->errorString());
+            return;
         }
         
         emit status("Verifying program...");
@@ -336,6 +300,7 @@ void PX4FirmwareUpgradeThreadWorker::_flash(void)
         } else {
             qCDebug(FirmwareUpgradeLog) << "Verify failed:" << _bootloader->errorString();
             emit error(_bootloader->errorString());
+            return;
         }
     }
     

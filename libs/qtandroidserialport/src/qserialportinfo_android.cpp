@@ -45,10 +45,12 @@
 #include <android/log.h>
 
 QT_BEGIN_NAMESPACE
-static const char V_jniClassName[] {"org/qgroundcontrol/qgchelper/UsbDeviceJNI"};
+static const char V_jniClassName[] {"org/mavlink/qgroundcontrol/QGCActivity"};
 static const char V_TAG[] {"QGC_QSerialPortInfo"};
 
 extern void cleanJavaException();
+
+static int gErrorCount = 0;
 
 QList<QSerialPortInfo> availablePortsByFiltersOfDevices(bool &ok)
 {
@@ -61,9 +63,15 @@ QList<QSerialPortInfo> availablePortsByFiltersOfDevices(bool &ok)
         "()[Ljava/lang/String;");
     
     if (!resultL.isValid()) {
-        __android_log_print(ANDROID_LOG_ERROR, V_TAG, "Error from availableDevicesInfo");
+        //-- If 5 consecutive errors, ignore it.
+        if(gErrorCount < 5) {
+            gErrorCount++;
+            __android_log_print(ANDROID_LOG_ERROR, V_TAG, "Error from availableDevicesInfo");
+        }
         ok = false;
         return serialPortInfoList;
+    } else {
+        gErrorCount = 0;
     }
 
     QAndroidJniEnvironment envL;

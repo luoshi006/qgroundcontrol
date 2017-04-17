@@ -1,25 +1,12 @@
-/*=====================================================================
+/****************************************************************************
+ *
+ *   (c) 2009-2016 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
+ *
+ * QGroundControl is licensed according to the terms in the file
+ * COPYING.md in the root of the source code directory.
+ *
+ ****************************************************************************/
 
-QGroundControl Open Source Ground Control Station
-
-(c) 2009 - 2011 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
-
-This file is part of the QGROUNDCONTROL project
-
-    QGROUNDCONTROL is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
-
-    QGROUNDCONTROL is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with QGROUNDCONTROL. If not, see <http://www.gnu.org/licenses/>.
-
-======================================================================*/
 
 /*!
  * @file
@@ -29,7 +16,8 @@ This file is part of the QGROUNDCONTROL project
 
 #include "QGCApplication.h"
 #include "UASMessageHandler.h"
-#include "UASManager.h"
+#include "MultiVehicleManager.h"
+#include "UAS.h"
 
 UASMessage::UASMessage(int componentid, int severity, QString text)
 {
@@ -51,24 +39,35 @@ bool UASMessage::severityIsError()
     }
 }
 
-IMPLEMENT_QGC_SINGLETON(UASMessageHandler, UASMessageHandler)
-
-UASMessageHandler::UASMessageHandler(QObject *parent)
-    : QGCSingleton(parent)
-    , _activeUAS(NULL)
+UASMessageHandler::UASMessageHandler(QGCApplication* app, QGCToolbox* toolbox)
+    : QGCTool(app, toolbox)
+    , _activeVehicle(NULL)
+    , _activeComponent(-1)
+    , _multiComp(false)
     , _errorCount(0)
     , _errorCountTotal(0)
     , _warningCount(0)
     , _normalCount(0)
+    , _showErrorsInToolbar(false)
+    , _multiVehicleManager(NULL)
 {
-    connect(UASManager::instance(), SIGNAL(activeUASSet(UASInterface*)), this, SLOT(setActiveUAS(UASInterface*)));
-    emit textMessageReceived(NULL);
-    emit textMessageCountChanged(0);
+
 }
 
 UASMessageHandler::~UASMessageHandler()
 {
     clearMessages();
+}
+
+void UASMessageHandler::setToolbox(QGCToolbox *toolbox)
+{
+   QGCTool::setToolbox(toolbox);
+
+   _multiVehicleManager = _toolbox->multiVehicleManager();
+
+   connect(_multiVehicleManager, &MultiVehicleManager::activeVehicleChanged, this, &UASMessageHandler::_activeVehicleChanged);
+   emit textMessageReceived(NULL);
+   emit textMessageCountChanged(0);
 }
 
 void UASMessageHandler::clearMessages()
@@ -85,28 +84,31 @@ void UASMessageHandler::clearMessages()
     emit textMessageCountChanged(0);
 }
 
-void UASMessageHandler::setActiveUAS(UASInterface* uas)
+void UASMessageHandler::_activeVehicleChanged(Vehicle* vehicle)
 {
     // If we were already attached to an autopilot, disconnect it.
-    if (_activeUAS && _activeUAS != uas)
-    {
-        disconnect(_activeUAS, SIGNAL(textMessageReceived(int,int,int,QString)), this, SLOT(handleTextMessage(int,int,int,QString)));
-        _activeUAS = NULL;
+    if (_activeVehicle) {
+        disconnect(_activeVehicle->uas(), &UASInterface::textMessageReceived, this, &UASMessageHandler::handleTextMessage);
+        _activeVehicle = NULL;
         clearMessages();
         emit textMessageReceived(NULL);
     }
+
     // And now if there's an autopilot to follow, set up the UI.
-    if (uas)
-    {
+    if (vehicle) {
         // Connect to the new UAS.
         clearMessages();
-        _activeUAS = uas;
-        connect(uas, SIGNAL(textMessageReceived(int,int,int,QString)), this, SLOT(handleTextMessage(int,int,int,QString)));
+        _activeVehicle = vehicle;
+        connect(_activeVehicle->uas(), &UASInterface::textMessageReceived, this, &UASMessageHandler::handleTextMessage);
     }
 }
 
 void UASMessageHandler::handleTextMessage(int, int compId, int severity, QString text)
 {
+    // Hack to prevent calibration messages from cluttering things up
+    if (_activeVehicle->px4Firmware() && text.startsWith(QStringLiteral("[cal] "))) {
+        return;
+    }
 
     // Color the output depending on the message severity. We have 3 distinct cases:
     // 1: If we have an ERROR or worse, make it bigger, bolder, and highlight it red.
@@ -114,6 +116,14 @@ void UASMessageHandler::handleTextMessage(int, int compId, int severity, QString
     // 3: Otherwise color it the standard color, white.
 
     _mutex.lock();
+
+    if (_activeComponent < 0) {
+        _activeComponent = compId;
+    }
+
+    if (compId != _activeComponent) {
+        _multiComp = true;
+    }
 
     // So first determine the styling based on the severity.
     QString style;
@@ -123,18 +133,17 @@ void UASMessageHandler::handleTextMessage(int, int compId, int severity, QString
     case MAV_SEVERITY_ALERT:
     case MAV_SEVERITY_CRITICAL:
     case MAV_SEVERITY_ERROR:
-        //Use set RGB values from given color from QGC
-        style = QString("color: rgb(%1, %2, %3); font-weight:bold").arg(QGC::colorRed.red()).arg(QGC::colorRed.green()).arg(QGC::colorRed.blue());
+        style = QString("<#E>");
         _errorCount++;
         _errorCountTotal++;
         break;
     case MAV_SEVERITY_NOTICE:
     case MAV_SEVERITY_WARNING:
-        style = QString("color: rgb(%1, %2, %3); font-weight:bold").arg(QGC::colorOrange.red()).arg(QGC::colorOrange.green()).arg(QGC::colorOrange.blue());
+        style = QString("<#I>");
         _warningCount++;
         break;
     default:
-        style = QString("color:white; font-weight:bold");
+        style = QString("<#N>");
         _normalCount++;
         break;
     }
@@ -175,15 +184,27 @@ void UASMessageHandler::handleTextMessage(int, int compId, int severity, QString
     // Finally preppend the properly-styled text with a timestamp.
     QString dateString = QDateTime::currentDateTime().toString("hh:mm:ss.zzz");
     UASMessage* message = new UASMessage(compId, severity, text);
-    message->_setFormatedText(QString("<p style=\"color:#CCCCCC\">[%2 - COMP:%3]<font style=\"%1\">%4 %5</font></p>").arg(style).arg(dateString).arg(compId).arg(severityText).arg(text));
-    _messages.append(message);
-    int count = _messages.count();
+    QString compString("");
+    if (_multiComp) {
+        compString = QString(" COMP:%1").arg(compId);
+    }
+    message->_setFormatedText(QString("<font style=\"%1\">[%2%3]%4 %5</font><br/>").arg(style).arg(dateString).arg(compString).arg(severityText).arg(text));
+
     if (message->severityIsError()) {
         _latestError = severityText + " " + text;
     }
+
     _mutex.unlock();
+
     emit textMessageReceived(message);
+
+    _messages.append(message);
+    int count = _messages.count();
     emit textMessageCountChanged(count);
+
+    if (_showErrorsInToolbar && message->severityIsError()) {
+        _app->showMessage(message->getText());
+    }
 }
 
 int UASMessageHandler::getErrorCountTotal() {

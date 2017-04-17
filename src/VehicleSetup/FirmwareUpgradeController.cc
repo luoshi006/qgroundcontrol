@@ -1,25 +1,12 @@
-/*=====================================================================
- 
- QGroundControl Open Source Ground Control Station
- 
- (c) 2009, 2015 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
- 
- This file is part of the QGROUNDCONTROL project
- 
- QGROUNDCONTROL is free software: you can redistribute it and/or modify
- it under the terms of the GNU General Public License as published by
- the Free Software Foundation, either version 3 of the License, or
- (at your option) any later version.
- 
- QGROUNDCONTROL is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU General Public License for more details.
- 
- You should have received a copy of the GNU General Public License
- along with QGROUNDCONTROL. If not, see <http://www.gnu.org/licenses/>.
- 
- ======================================================================*/
+/****************************************************************************
+ *
+ *   (c) 2009-2016 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
+ *
+ * QGroundControl is licensed according to the terms in the file
+ * COPYING.md in the root of the source code directory.
+ *
+ ****************************************************************************/
+
 
 /// @file
 ///     @brief PX4 Firmware Upgrade UI
@@ -27,15 +14,42 @@
 
 #include "FirmwareUpgradeController.h"
 #include "Bootloader.h"
-#include "QGCFileDialog.h"
-#include "QGCMessageBox.h"
+#include "QGCQFileDialog.h"
+#include "QGCApplication.h"
+#include "QGCFileDownload.h"
+#include "QGCOptions.h"
+#include "QGCCorePlugin.h"
+
+#include <QStandardPaths>
+#include <QRegularExpression>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QNetworkProxy>
+
+struct FirmwareToUrlElement_t {
+    FirmwareUpgradeController::AutoPilotStackType_t    stackType;
+    FirmwareUpgradeController::FirmwareType_t          firmwareType;
+    FirmwareUpgradeController::FirmwareVehicleType_t   vehicleType;
+    QString                                            url;
+};
+
+uint qHash(const FirmwareUpgradeController::FirmwareIdentifier& firmwareId)
+{
+    return ( firmwareId.autopilotStackType |
+             (firmwareId.firmwareType << 8) |
+             (firmwareId.firmwareVehicleType << 16) );
+}
 
 /// @Brief Constructs a new FirmwareUpgradeController Widget. This widget is used within the PX4VehicleConfig set of screens.
-FirmwareUpgradeController::FirmwareUpgradeController(void) :
-    _downloadManager(NULL),
-    _downloadNetworkReply(NULL),
-    _statusLog(NULL),
-    _image(NULL)
+FirmwareUpgradeController::FirmwareUpgradeController(void)
+    : _singleFirmwareURL(qgcApp()->toolbox()->corePlugin()->options()->firmwareUpgradeSingleURL())
+    , _singleFirmwareMode(!_singleFirmwareURL.isEmpty())
+    , _downloadManager(NULL)
+    , _downloadNetworkReply(NULL)
+    , _statusLog(NULL)
+    , _selectedFirmwareType(StableFirmware)
+    , _image(NULL)
 {
     _threadController = new PX4FirmwareUpgradeThreadController(this);
     Q_CHECK_PTR(_threadController);
@@ -53,27 +67,56 @@ FirmwareUpgradeController::FirmwareUpgradeController(void) :
     connect(_threadController, &PX4FirmwareUpgradeThreadController::flashComplete,          this, &FirmwareUpgradeController::_flashComplete);
     connect(_threadController, &PX4FirmwareUpgradeThreadController::updateProgress,         this, &FirmwareUpgradeController::_updateProgress);
     
-    connect(LinkManager::instance(), &LinkManager::linkDisconnected, this, &FirmwareUpgradeController::_linkDisconnected);
-
     connect(&_eraseTimer, &QTimer::timeout, this, &FirmwareUpgradeController::_eraseProgressTick);
+
+    _initFirmwareHash();
+    _determinePX4StableVersion();
+}
+
+FirmwareUpgradeController::~FirmwareUpgradeController()
+{
+    qgcApp()->toolbox()->linkManager()->setConnectionsAllowed();
 }
 
 void FirmwareUpgradeController::startBoardSearch(void)
 {
+    LinkManager* linkMgr = qgcApp()->toolbox()->linkManager();
+
+    linkMgr->setConnectionsSuspended(tr("Connect not allowed during Firmware Upgrade."));
+
+    // FIXME: Why did we get here with active vehicle?
+    if (!qgcApp()->toolbox()->multiVehicleManager()->activeVehicle()) {
+        // We have to disconnect any inactive links
+        linkMgr->disconnectAll();
+    }
+
     _bootloaderFound = false;
     _startFlashWhenBootloaderFound = false;
     _threadController->startFindBoardLoop();
 }
 
-void FirmwareUpgradeController::flash(FirmwareType_t firmwareType)
+void FirmwareUpgradeController::flash(AutoPilotStackType_t stackType,
+                                      FirmwareType_t firmwareType,
+                                      FirmwareVehicleType_t vehicleType)
 {
+    FirmwareIdentifier firmwareId = FirmwareIdentifier(stackType, firmwareType, vehicleType);
     if (_bootloaderFound) {
-        _getFirmwareFile(firmwareType);
+        _getFirmwareFile(firmwareId);
     } else {
         // We haven't found the bootloader yet. Need to wait until then to flash
         _startFlashWhenBootloaderFound = true;
-        _startFlashWhenBootloaderFoundFirmwareType = firmwareType;
+        _startFlashWhenBootloaderFoundFirmwareIdentity = firmwareId;
     }
+}
+
+void FirmwareUpgradeController::flash(const FirmwareIdentifier& firmwareId)
+{
+    flash(firmwareId.autopilotStackType, firmwareId.firmwareType, firmwareId.firmwareVehicleType);
+}
+
+void FirmwareUpgradeController::flashSingleFirmwareMode(void)
+{
+    flash(SingleFirmwareMode, StableFirmware, DefaultVehicleFirmware);
 }
 
 void FirmwareUpgradeController::cancel(void)
@@ -82,35 +125,25 @@ void FirmwareUpgradeController::cancel(void)
     _threadController->cancel();
 }
 
-void FirmwareUpgradeController::_foundBoard(bool firstAttempt, const QSerialPortInfo& info, int type)
+void FirmwareUpgradeController::_foundBoard(bool firstAttempt, const QSerialPortInfo& info, int boardType, QString boardName)
 {
     _foundBoardInfo = info;
-    switch (type) {
-        case FoundBoardPX4FMUV1:
-            _foundBoardType = "PX4 FMU V1";
-            _startFlashWhenBootloaderFound = false;
-            break;
-        case FoundBoardPX4FMUV2:
-            _foundBoardType = "Pixhawk";
-            _startFlashWhenBootloaderFound = false;
-            break;
-	case FoundBoardAeroCore:
-            _foundBoardType = "AeroCore";
-            _startFlashWhenBootloaderFound = false;
-            break;
-        case FoundBoardPX4Flow:
-        case FoundBoard3drRadio:
-            _foundBoardType = type == FoundBoardPX4Flow ? "PX4 Flow" : "3DR Radio";
-            if (!firstAttempt) {
-                // PX4 Flow and Radio always flash stable firmware, so we can start right away without
-                // any further user input.
-                _startFlashWhenBootloaderFound = true;
-                _startFlashWhenBootloaderFoundFirmwareType = PX4StableFirmware;
-            }
-            break;
+    _foundBoardType = (QGCSerialPortInfo::BoardType_t)boardType;
+    _foundBoardTypeName = boardName;
+    _startFlashWhenBootloaderFound = false;
+
+    if (_foundBoardType == QGCSerialPortInfo::BoardTypeSiKRadio) {
+        if (!firstAttempt) {
+            // Radio always flashes latest firmware, so we can start right away without
+            // any further user input.
+            _startFlashWhenBootloaderFound = true;
+            _startFlashWhenBootloaderFoundFirmwareIdentity = FirmwareIdentifier(ThreeDRRadio,
+                                                                                StableFirmware,
+                                                                                DefaultVehicleFirmware);
+        }
     }
     
-    qCDebug(FirmwareUpgradeLog) << _foundBoardType;
+    qCDebug(FirmwareUpgradeLog) << _foundBoardType << _foundBoardTypeName;
     emit boardFound();
 }
 
@@ -140,7 +173,226 @@ void FirmwareUpgradeController::_foundBootloader(int bootloaderVersion, int boar
     _appendStatusLog(QString("  Flash size: %1").arg(_bootloaderBoardFlashSize));
     
     if (_startFlashWhenBootloaderFound) {
-        flash(_startFlashWhenBootloaderFoundFirmwareType);
+        flash(_startFlashWhenBootloaderFoundFirmwareIdentity);
+    }
+
+    _loadAPMVersions(_bootloaderBoardID);
+}
+
+
+/// @brief intializes the firmware hashes with proper urls.
+/// This happens only once for a class instance first time when it is needed.
+void FirmwareUpgradeController::_initFirmwareHash()
+{
+    // indirect check whether this function has been called before or not
+    // may have to be modified if _rgPX4FMUV2Firmware disappears
+    if (!_rgPX4FMUV2Firmware.isEmpty()) {
+        return;
+    }
+
+    //////////////////////////////////// PX4FMUV4 firmwares //////////////////////////////////////////////////
+    FirmwareToUrlElement_t rgPX4FMV4FirmwareArray[] = {
+        { AutoPilotStackPX4, StableFirmware,    DefaultVehicleFirmware, "http://px4-travis.s3.amazonaws.com/Firmware/stable/px4fmu-v4_default.px4"},
+        { AutoPilotStackPX4, BetaFirmware,      DefaultVehicleFirmware, "http://px4-travis.s3.amazonaws.com/Firmware/beta/px4fmu-v4_default.px4"},
+        { AutoPilotStackPX4, DeveloperFirmware, DefaultVehicleFirmware, "http://px4-travis.s3.amazonaws.com/Firmware/master/px4fmu-v4_default.px4"},
+        { AutoPilotStackAPM, StableFirmware,    QuadFirmware,           "http://firmware.ardupilot.org/Copter/stable/PX4-quad/ArduCopter-v4.px4"},
+        { AutoPilotStackAPM, StableFirmware,    X8Firmware,             "http://firmware.ardupilot.org/Copter/stable/PX4-octa-quad/ArduCopter-v4.px4"},
+        { AutoPilotStackAPM, StableFirmware,    HexaFirmware,           "http://firmware.ardupilot.org/Copter/stable/PX4-hexa/ArduCopter-v4.px4"},
+        { AutoPilotStackAPM, StableFirmware,    OctoFirmware,           "http://firmware.ardupilot.org/Copter/stable/PX4-octa/ArduCopter-v4.px4"},
+        { AutoPilotStackAPM, StableFirmware,    YFirmware,              "http://firmware.ardupilot.org/Copter/stable/PX4-tri/ArduCopter-v4.px4"},
+        { AutoPilotStackAPM, StableFirmware,    Y6Firmware,             "http://firmware.ardupilot.org/Copter/stable/PX4-y6/ArduCopter-v4.px4"},
+        { AutoPilotStackAPM, StableFirmware,    HeliFirmware,           "http://firmware.ardupilot.org/Copter/stable/PX4-heli/ArduCopter-v4.px4"},
+        { AutoPilotStackAPM, StableFirmware,    PlaneFirmware,          "http://firmware.ardupilot.org/Plane/stable/PX4/ArduPlane-v4.px4"},
+        { AutoPilotStackAPM, StableFirmware,    RoverFirmware,          "http://firmware.ardupilot.org/Rover/stable/PX4/APMrover2-v4.px4"},
+        { AutoPilotStackAPM, BetaFirmware,      CopterFirmware,         "http://firmware.ardupilot.org/Copter/beta/PX4/ArduCopter-v4.px4"},
+        { AutoPilotStackAPM, BetaFirmware,      HeliFirmware,           "http://firmware.ardupilot.org/Copter/beta/PX4-heli/ArduCopter-v4.px4"},
+        { AutoPilotStackAPM, BetaFirmware,      PlaneFirmware,          "http://firmware.ardupilot.org/Plane/beta/PX4/ArduPlane-v4.px4"},
+        { AutoPilotStackAPM, BetaFirmware,      RoverFirmware,          "http://firmware.ardupilot.org/Rover/beta/PX4/APMrover2-v4.px4"},
+        { AutoPilotStackAPM, DeveloperFirmware, CopterFirmware,         "http://firmware.ardupilot.org/Copter/latest/PX4/ArduCopter-v4.px4"},
+        { AutoPilotStackAPM, DeveloperFirmware, HeliFirmware,           "http://firmware.ardupilot.org/Copter/latest/PX4-heli/ArduCopter-v4.px4"},
+        { AutoPilotStackAPM, DeveloperFirmware, PlaneFirmware,          "http://firmware.ardupilot.org/Plane/latest/PX4/ArduPlane-v4.px4"},
+        { AutoPilotStackAPM, DeveloperFirmware, RoverFirmware,          "http://firmware.ardupilot.org/Rover/latest/PX4/APMrover2-v4.px4"},
+        { SingleFirmwareMode,StableFirmware,    DefaultVehicleFirmware, _singleFirmwareURL},
+    };
+
+    //////////////////////////////////// PX4FMUV2 firmwares //////////////////////////////////////////////////
+    FirmwareToUrlElement_t rgPX4FMV2FirmwareArray[] = {
+        { AutoPilotStackPX4, StableFirmware,    DefaultVehicleFirmware, "http://px4-travis.s3.amazonaws.com/Firmware/stable/px4fmu-v2_default.px4"},
+        { AutoPilotStackPX4, BetaFirmware,      DefaultVehicleFirmware, "http://px4-travis.s3.amazonaws.com/Firmware/beta/px4fmu-v2_default.px4"},
+        { AutoPilotStackPX4, DeveloperFirmware, DefaultVehicleFirmware, "http://px4-travis.s3.amazonaws.com/Firmware/master/px4fmu-v2_default.px4"},
+        { AutoPilotStackAPM, StableFirmware,    QuadFirmware,           "http://firmware.ardupilot.org/Copter/stable/PX4-quad/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, StableFirmware,    X8Firmware,             "http://firmware.ardupilot.org/Copter/stable/PX4-octa-quad/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, StableFirmware,    HexaFirmware,           "http://firmware.ardupilot.org/Copter/stable/PX4-hexa/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, StableFirmware,    OctoFirmware,           "http://firmware.ardupilot.org/Copter/stable/PX4-octa/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, StableFirmware,    YFirmware,              "http://firmware.ardupilot.org/Copter/stable/PX4-tri/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, StableFirmware,    Y6Firmware,             "http://firmware.ardupilot.org/Copter/stable/PX4-y6/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, StableFirmware,    HeliFirmware,           "http://firmware.ardupilot.org/Copter/stable/PX4-heli/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, StableFirmware,    PlaneFirmware,          "http://firmware.ardupilot.org/Plane/stable/PX4/ArduPlane-v2.px4"},
+        { AutoPilotStackAPM, StableFirmware,    RoverFirmware,          "http://firmware.ardupilot.org/Rover/stable/PX4/APMrover2-v2.px4"},
+        { AutoPilotStackAPM, BetaFirmware,      CopterFirmware,         "http://firmware.ardupilot.org/Copter/beta/PX4/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, BetaFirmware,      HeliFirmware,           "http://firmware.ardupilot.org/Copter/beta/PX4-heli/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, BetaFirmware,      PlaneFirmware,          "http://firmware.ardupilot.org/Plane/beta/PX4/ArduPlane-v2.px4"},
+        { AutoPilotStackAPM, BetaFirmware,      RoverFirmware,          "http://firmware.ardupilot.org/Rover/beta/PX4/APMrover2-v2.px4"},
+        { AutoPilotStackAPM, DeveloperFirmware, CopterFirmware,         "http://firmware.ardupilot.org/Copter/latest/PX4/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, DeveloperFirmware, HeliFirmware,           "http://firmware.ardupilot.org/Copter/latest/PX4-heli/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, DeveloperFirmware, PlaneFirmware,          "http://firmware.ardupilot.org/Plane/latest/PX4/ArduPlane-v2.px4"},
+        { AutoPilotStackAPM, DeveloperFirmware, RoverFirmware,          "http://firmware.ardupilot.org/Rover/latest/PX4/APMrover2-v2.px4"},
+        { AutoPilotStackAPM, DeveloperFirmware, SubFirmware,            "http://firmware.ardupilot.org/Sub/latest/PX4/ArduSub-v2.px4"},
+        { SingleFirmwareMode,StableFirmware,    DefaultVehicleFirmware, _singleFirmwareURL},
+    };
+
+    //////////////////////////////////// PX4FMU aerocore firmwares //////////////////////////////////////////////////
+    FirmwareToUrlElement_t  rgAeroCoreFirmwareArray[] = {
+        { AutoPilotStackPX4, StableFirmware,    DefaultVehicleFirmware, "http://gumstix-aerocore.s3.amazonaws.com/PX4/stable/aerocore_default.px4"},
+        { AutoPilotStackPX4, BetaFirmware,      DefaultVehicleFirmware, "http://gumstix-aerocore.s3.amazonaws.com/PX4/beta/aerocore_default.px4"},
+        { AutoPilotStackPX4, DeveloperFirmware, DefaultVehicleFirmware, "http://gumstix-aerocore.s3.amazonaws.com/PX4/master/aerocore_default.px4"},
+        { AutoPilotStackAPM, StableFirmware,    QuadFirmware,           "http://gumstix-aerocore.s3.amazonaws.com/APM/Copter/stable/PX4-quad/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, StableFirmware,    X8Firmware,             "http://gumstix-aerocore.s3.amazonaws.com/Copter/stable/PX4-octa-quad/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, StableFirmware,    HexaFirmware,           "http://gumstix-aerocore.s3.amazonaws.com/Copter/stable/PX4-hexa/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, StableFirmware,    OctoFirmware,           "http://gumstix-aerocore.s3.amazonaws.com/Copter/stable/PX4-octa/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, StableFirmware,    YFirmware,              "http://gumstix-aerocore.s3.amazonaws.com/Copter/stable/PX4-tri/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, StableFirmware,    Y6Firmware,             "http://gumstix-aerocore.s3.amazonaws.com/Copter/stable/PX4-y6/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, StableFirmware,    HeliFirmware,           "http://gumstix-aerocore.s3.amazonaws.com/Copter/stable/PX4-heli/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, StableFirmware,    PlaneFirmware,          "http://gumstix-aerocore.s3.amazonaws.com/Plane/stable/PX4/ArduPlane-v2.px4"},
+        { AutoPilotStackAPM, StableFirmware,    RoverFirmware,          "http://gumstix-aerocore.s3.amazonaws.com/Rover/stable/PX4/APMrover2-v2.px4"},
+        { AutoPilotStackAPM, BetaFirmware,      CopterFirmware,         "http://firmware.ardupilot.org/Copter/beta/PX4/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, BetaFirmware,      HeliFirmware,           "http://firmware.ardupilot.org/Copter/beta/PX4-heli/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, BetaFirmware,      PlaneFirmware,          "http://firmware.ardupilot.org/Plane/beta/PX4/ArduPlane-v2.px4"},
+        { AutoPilotStackAPM, BetaFirmware,      RoverFirmware,          "http://firmware.ardupilot.org/Rover/beta/PX4/APMrover2-v2.px4"},
+        { AutoPilotStackAPM, DeveloperFirmware, QuadFirmware,           "http://gumstix-aerocore.s3.amazonaws.com/Copter/latest/PX4-quad/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, DeveloperFirmware, X8Firmware,             "http://gumstix-aerocore.s3.amazonaws.com/Copter/latest/PX4-octa-quad/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, DeveloperFirmware, HexaFirmware,           "http://gumstix-aerocore.s3.amazonaws.com/Copter/latest/PX4-hexa/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, DeveloperFirmware, OctoFirmware,           "http://gumstix-aerocore.s3.amazonaws.com/Copter/latest/PX4-octa/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, DeveloperFirmware, YFirmware,              "http://gumstix-aerocore.s3.amazonaws.com/Copter/latest/PX4-tri/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, DeveloperFirmware, Y6Firmware,             "http://gumstix-aerocore.s3.amazonaws.com/Copter/latest/PX4-y6/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, DeveloperFirmware, HeliFirmware,           "http://gumstix-aerocore.s3.amazonaws.com/Copter/latest/PX4-heli/ArduCopter-v2.px4"},
+        { AutoPilotStackAPM, DeveloperFirmware, PlaneFirmware,          "http://gumstix-aerocore.s3.amazonaws.com/Plane/latest/PX4/ArduPlane-v2.px4"},
+        { AutoPilotStackAPM, DeveloperFirmware, RoverFirmware,          "http://gumstix-aerocore.s3.amazonaws.com/Rover/latest/PX4/APMrover2-v2.px4"}
+    };
+
+    /////////////////////////////// FMUV1 firmwares ///////////////////////////////////////////
+    FirmwareToUrlElement_t rgPX4FMUV1FirmwareArray[] = {
+        { AutoPilotStackPX4, StableFirmware,    DefaultVehicleFirmware, "http://px4-travis.s3.amazonaws.com/Firmware/stable/px4fmu-v1_default.px4"},
+        { AutoPilotStackPX4, BetaFirmware,      DefaultVehicleFirmware, "http://px4-travis.s3.amazonaws.com/Firmware/beta/px4fmu-v1_default.px4"},
+        { AutoPilotStackPX4, DeveloperFirmware, DefaultVehicleFirmware, "http://px4-travis.s3.amazonaws.com/Firmware/master/px4fmu-v1_default.px4"},
+        { AutoPilotStackAPM, StableFirmware,    QuadFirmware,           "http://firmware.ardupilot.org/Copter/stable/PX4-quad/ArduCopter-v1.px4"},
+        { AutoPilotStackAPM, StableFirmware,    X8Firmware,             "http://firmware.ardupilot.org/Copter/stable/PX4-octa-quad/ArduCopter-v1.px4"},
+        { AutoPilotStackAPM, StableFirmware,    HexaFirmware,           "http://firmware.ardupilot.org/Copter/stable/PX4-hexa/ArduCopter-v1.px4"},
+        { AutoPilotStackAPM, StableFirmware,    OctoFirmware,           "http://firmware.ardupilot.org/Copter/stable/PX4-octa/ArduCopter-v1.px4"},
+        { AutoPilotStackAPM, StableFirmware,    YFirmware,              "http://firmware.ardupilot.org/Copter/stable/PX4-tri/ArduCopter-v1.px4"},
+        { AutoPilotStackAPM, StableFirmware,    Y6Firmware,             "http://firmware.ardupilot.org/Copter/stable/PX4-y6/ArduCopter-v1.px4"},
+        { AutoPilotStackAPM, StableFirmware,    HeliFirmware,           "http://firmware.ardupilot.org/Copter/stable/PX4-heli/ArduCopter-v1.px4"},
+        { AutoPilotStackAPM, StableFirmware,    PlaneFirmware,          "http://firmware.ardupilot.org/Plane/stable/PX4/ArduPlane-v1.px4"},
+        { AutoPilotStackAPM, StableFirmware,    RoverFirmware,          "http://firmware.ardupilot.org/Rover/stable/PX4/APMrover2-v1.px4"},
+        { AutoPilotStackAPM, BetaFirmware,      CopterFirmware,         "http://firmware.ardupilot.org/Copter/beta/PX4/ArduCopter-v1.px4"},
+        { AutoPilotStackAPM, BetaFirmware,      HeliFirmware,           "http://firmware.ardupilot.org/Copter/beta/PX4-heli/ArduCopter-v1.px4"},
+        { AutoPilotStackAPM, BetaFirmware,      PlaneFirmware,          "http://firmware.ardupilot.org/Plane/beta/PX4/ArduPlane-v1.px4"},
+        { AutoPilotStackAPM, BetaFirmware,      RoverFirmware,          "http://firmware.ardupilot.org/Rover/beta/PX4/APMrover2-v1.px4"},
+        { AutoPilotStackAPM, DeveloperFirmware, CopterFirmware,         "http://firmware.ardupilot.org/Copter/latest/PX4/ArduCopter-v1.px4"},
+        { AutoPilotStackAPM, DeveloperFirmware, HeliFirmware,           "http://firmware.ardupilot.org/Copter/latest/PX4-heli/ArduCopter-v1.px4"},
+        { AutoPilotStackAPM, DeveloperFirmware, PlaneFirmware,          "http://firmware.ardupilot.org/Plane/latest/PX4/ArduPlane-v1.px4"},
+        { AutoPilotStackAPM, DeveloperFirmware, RoverFirmware,          "http://firmware.ardupilot.org/Rover/latest/PX4/APMrover2-v1.px4"}
+    };
+    //////////////////////////////////// AUAVX2_1 firmwares //////////////////////////////////////////////////
+    FirmwareToUrlElement_t rgAUAVX2_1FirmwareArray[] = {
+        { AutoPilotStackPX4, StableFirmware,    DefaultVehicleFirmware, "http://px4-travis.s3.amazonaws.com/Firmware/stable/auav-x21_default.px4"},
+        { AutoPilotStackPX4, BetaFirmware,      DefaultVehicleFirmware, "http://px4-travis.s3.amazonaws.com/Firmware/beta/auav-x21_default.px4"},
+        { AutoPilotStackPX4, DeveloperFirmware, DefaultVehicleFirmware, "http://px4-travis.s3.amazonaws.com/Firmware/master/auav-x21_default.px4"},
+    };
+    //////////////////////////////////// MindPXFMUV2 firmwares //////////////////////////////////////////////////
+    FirmwareToUrlElement_t rgMindPXFMUV2FirmwareArray[] = {
+        { AutoPilotStackPX4, StableFirmware,    DefaultVehicleFirmware, "http://px4-travis.s3.amazonaws.com/Firmware/stable/mindpx-v2_default.px4"},
+        { AutoPilotStackPX4, BetaFirmware,      DefaultVehicleFirmware, "http://px4-travis.s3.amazonaws.com/Firmware/beta/mindpx-v2_default.px4"},
+        { AutoPilotStackPX4, DeveloperFirmware, DefaultVehicleFirmware, "http://px4-travis.s3.amazonaws.com/Firmware/master/mindpx-v2_default.px4"},
+    };
+    //////////////////////////////////// TAPV1 firmwares //////////////////////////////////////////////////
+    FirmwareToUrlElement_t rgTAPV1FirmwareArray[] = {
+        { AutoPilotStackPX4, StableFirmware,    DefaultVehicleFirmware, "http://px4-travis.s3.amazonaws.com/Firmware/stable/tap-v1_default.px4"},
+        { AutoPilotStackPX4, BetaFirmware,      DefaultVehicleFirmware, "http://px4-travis.s3.amazonaws.com/Firmware/beta/tap-v1_default.px4"},
+        { AutoPilotStackPX4, DeveloperFirmware, DefaultVehicleFirmware, "http://px4-travis.s3.amazonaws.com/Firmware/master/tap-v1_default.px4"},
+        { SingleFirmwareMode,StableFirmware,    DefaultVehicleFirmware, _singleFirmwareURL},
+    };
+    //////////////////////////////////// ASCV1 firmwares //////////////////////////////////////////////////
+    FirmwareToUrlElement_t rgASCV1FirmwareArray[] = {
+        { AutoPilotStackPX4, StableFirmware,    DefaultVehicleFirmware, "http://px4-travis.s3.amazonaws.com/Firmware/stable/asc-v1_default.px4"},
+        { AutoPilotStackPX4, BetaFirmware,      DefaultVehicleFirmware, "http://px4-travis.s3.amazonaws.com/Firmware/beta/asc-v1_default.px4"},
+        { AutoPilotStackPX4, DeveloperFirmware, DefaultVehicleFirmware, "http://px4-travis.s3.amazonaws.com/Firmware/master/asc-v1_default.px4"},
+    };
+    /////////////////////////////// px4flow firmwares ///////////////////////////////////////
+    FirmwareToUrlElement_t rgPX4FLowFirmwareArray[] = {
+        { PX4Flow, StableFirmware, DefaultVehicleFirmware, "http://px4-travis.s3.amazonaws.com/Flow/master/px4flow.px4" },
+    };
+
+    /////////////////////////////// 3dr radio firmwares ///////////////////////////////////////
+    FirmwareToUrlElement_t rg3DRRadioFirmwareArray[] = {
+        { ThreeDRRadio, StableFirmware, DefaultVehicleFirmware, "http://firmware.ardupilot.org/SiK/stable/radio~hm_trp.ihx"}
+    };
+
+    // populate hashes now
+    int size = sizeof(rgPX4FMV4FirmwareArray)/sizeof(rgPX4FMV4FirmwareArray[0]);
+    for (int i = 0; i < size; i++) {
+        const FirmwareToUrlElement_t& element = rgPX4FMV4FirmwareArray[i];
+        _rgPX4FMUV4Firmware.insert(FirmwareIdentifier(element.stackType, element.firmwareType, element.vehicleType), element.url);
+    }
+
+    size = sizeof(rgPX4FMV2FirmwareArray)/sizeof(rgPX4FMV2FirmwareArray[0]);
+    for (int i = 0; i < size; i++) {
+        const FirmwareToUrlElement_t& element = rgPX4FMV2FirmwareArray[i];
+        _rgPX4FMUV2Firmware.insert(FirmwareIdentifier(element.stackType, element.firmwareType, element.vehicleType), element.url);
+    }
+
+    size = sizeof(rgAeroCoreFirmwareArray)/sizeof(rgAeroCoreFirmwareArray[0]);
+    for (int i = 0; i < size; i++) {
+        const FirmwareToUrlElement_t& element = rgAeroCoreFirmwareArray[i];
+        _rgAeroCoreFirmware.insert(FirmwareIdentifier(element.stackType, element.firmwareType, element.vehicleType), element.url);
+    }
+
+    size = sizeof(rgPX4FMUV1FirmwareArray)/sizeof(rgPX4FMUV1FirmwareArray[0]);
+    for (int i = 0; i < size; i++) {
+        const FirmwareToUrlElement_t& element = rgPX4FMUV1FirmwareArray[i];
+        _rgPX4FMUV1Firmware.insert(FirmwareIdentifier(element.stackType, element.firmwareType, element.vehicleType), element.url);
+    }
+
+    size = sizeof(rgAUAVX2_1FirmwareArray)/sizeof(rgAUAVX2_1FirmwareArray[0]);
+    for (int i = 0; i < size; i++) {
+        const FirmwareToUrlElement_t& element = rgAUAVX2_1FirmwareArray[i];
+        _rgAUAVX2_1Firmware.insert(FirmwareIdentifier(element.stackType, element.firmwareType, element.vehicleType), element.url);
+    }
+
+    size = sizeof(rgMindPXFMUV2FirmwareArray)/sizeof(rgMindPXFMUV2FirmwareArray[0]);
+    for (int i = 0; i < size; i++) {
+        const FirmwareToUrlElement_t& element = rgMindPXFMUV2FirmwareArray[i];
+        _rgMindPXFMUV2Firmware.insert(FirmwareIdentifier(element.stackType, element.firmwareType, element.vehicleType), element.url);
+    }
+
+    size = sizeof(rgTAPV1FirmwareArray)/sizeof(rgTAPV1FirmwareArray[0]);
+    for (int i = 0; i < size; i++) {
+        const FirmwareToUrlElement_t& element = rgTAPV1FirmwareArray[i];
+        _rgTAPV1Firmware.insert(FirmwareIdentifier(element.stackType, element.firmwareType, element.vehicleType), element.url);
+    }
+
+    size = sizeof(rgASCV1FirmwareArray)/sizeof(rgASCV1FirmwareArray[0]);
+    for (int i = 0; i < size; i++) {
+        const FirmwareToUrlElement_t& element = rgASCV1FirmwareArray[i];
+        _rgASCV1Firmware.insert(FirmwareIdentifier(element.stackType, element.firmwareType, element.vehicleType), element.url);
+    }
+
+    size = sizeof(rgPX4FLowFirmwareArray)/sizeof(rgPX4FLowFirmwareArray[0]);
+    for (int i = 0; i < size; i++) {
+        const FirmwareToUrlElement_t& element = rgPX4FLowFirmwareArray[i];
+        _rgPX4FLowFirmware.insert(FirmwareIdentifier(element.stackType, element.firmwareType, element.vehicleType), element.url);
+    }
+
+    size = sizeof(rg3DRRadioFirmwareArray)/sizeof(rg3DRRadioFirmwareArray[0]);
+    for (int i = 0; i < size; i++) {
+        const FirmwareToUrlElement_t& element = rg3DRRadioFirmwareArray[i];
+        _rg3DRRadioFirmware.insert(FirmwareIdentifier(element.stackType, element.firmwareType, element.vehicleType), element.url);
+    }
+
+    size = sizeof(rg3DRRadioFirmwareArray)/sizeof(rg3DRRadioFirmwareArray[0]);
+    for (int i = 0; i < size; i++) {
+        const FirmwareToUrlElement_t& element = rg3DRRadioFirmwareArray[i];
+        _rg3DRRadioFirmware.insert(FirmwareIdentifier(element.stackType, element.firmwareType, element.vehicleType), element.url);
     }
 }
 
@@ -151,117 +403,52 @@ void FirmwareUpgradeController::_bootloaderSyncFailed(void)
     _errorCancel("Unable to sync with bootloader.");
 }
 
-/// @brief Prompts the user to select a firmware file if needed and moves the state machine to the next state.
-void FirmwareUpgradeController::_getFirmwareFile(FirmwareType_t firmwareType)
+QHash<FirmwareUpgradeController::FirmwareIdentifier, QString>* FirmwareUpgradeController::_firmwareHashForBoardId(int boardId)
 {
-    static DownloadLocationByFirmwareType_t rgPX4FMUV2Firmware[] = {
-        { PX4StableFirmware,            "http://px4-travis.s3.amazonaws.com/Firmware/stable/px4fmu-v2_default.px4" },
-        { PX4BetaFirmware,              "http://px4-travis.s3.amazonaws.com/Firmware/beta/px4fmu-v2_default.px4" },
-        { PX4DeveloperFirmware,         "http://px4-travis.s3.amazonaws.com/Firmware/master/px4fmu-v2_default.px4"},
-        { ApmArduCopterQuadFirmware,    "http://firmware.diydrones.com/Copter/stable/PX4-quad/ArduCopter-v2.px4" },
-        { ApmArduCopterX8Firmware,      "http://firmware.diydrones.com/Copter/stable/PX4-octa-quad/ArduCopter-v2.px4" },
-        { ApmArduCopterHexaFirmware,    "http://firmware.diydrones.com/Copter/stable/PX4-hexa/ArduCopter-v2.px4" },
-        { ApmArduCopterOctoFirmware,    "http://firmware.diydrones.com/Copter/stable/PX4-octa/ArduCopter-v2.px4" },
-        { ApmArduCopterYFirmware,       "http://firmware.diydrones.com/Copter/stable/PX4-tri/ArduCopter-v2.px4" },
-        { ApmArduCopterY6Firmware,      "http://firmware.diydrones.com/Copter/stable/PX4-y6/ArduCopter-v2.px4" },
-        { ApmArduCopterHeliFirmware,    "http://firmware.diydrones.com/Copter/stable/PX4-heli/ArduCopter-v2.px4" },
-        { ApmArduPlaneFirmware,         "http://firmware.diydrones.com/Plane/stable/PX4/ArduPlane-v2.px4" },
-        { ApmRoverFirmware,             "http://firmware.diydrones.com/Plane/stable/PX4/APMrover2-v2.px4" },
-    };
-    static const size_t crgPX4FMUV2Firmware = sizeof(rgPX4FMUV2Firmware) / sizeof(rgPX4FMUV2Firmware[0]);
-    
-    static const DownloadLocationByFirmwareType_t rgAeroCoreFirmware[] = {
-        { PX4StableFirmware,    	"http://gumstix-aerocore.s3.amazonaws.com/PX4/stable/aerocore_default.px4" },
-        { PX4BetaFirmware,      	"http://gumstix-aerocore.s3.amazonaws.com/PX4/beta/aerocore_default.px4" },
-        { PX4DeveloperFirmware, 	"http://gumstix-aerocore.s3.amazonaws.com/PX4/master/aerocore_default.px4" },
-        { ApmArduCopterQuadFirmware,    "http://gumstix-aerocore.s3.amazonaws.com/APM/Copter/stable/PX4-quad/ArduCopter-aerocore.px4" },
-        { ApmArduCopterX8Firmware,      "http://gumstix-aerocore.s3.amazonaws.com/APM/Copter/stable/PX4-octa-quad/ArduCopter-aerocore.px4" },
-        { ApmArduCopterHexaFirmware,    "http://gumstix-aerocore.s3.amazonaws.com/APM/Copter/stable/PX4-hexa/ArduCopter-aerocore.px4" },
-        { ApmArduCopterOctoFirmware,    "http://gumstix-aerocore.s3.amazonaws.com/APM/Copter/stable/PX4-octa/ArduCopter-aerocore.px4" },
-        { ApmArduCopterYFirmware,       "http://gumstix-aerocore.s3.amazonaws.com/APM/Copter/stable/PX4-tri/ArduCopter-aerocore.px4" },
-        { ApmArduCopterY6Firmware,      "http://gumstix-aerocore.s3.amazonaws.com/APM/Copter/stable/PX4-y6/ArduCopter-aerocore.px4" },
-        { ApmArduCopterHeliFirmware,    "http://gumstix-aerocore.s3.amazonaws.com/APM/Copter/stable/PX4-heli/ArduCopter-aerocore.px4" },
-        { ApmArduPlaneFirmware,         "http://gumstix-aerocore.s3.amazonaws.com/APM/Plane/stable/PX4/ArduPlane-aerocore.px4" },
-        { ApmRoverFirmware,             "http://gumstix-aerocore.s3.amazonaws.com/APM/Plane/stable/PX4/APMrover2-aerocore.px4" },
-    };
-    static const size_t crgAeroCoreFirmware = sizeof(rgAeroCoreFirmware) / sizeof(rgAeroCoreFirmware[0]);
-    
-    static const DownloadLocationByFirmwareType_t rgPX4FMUV1Firmware[] = {
-        { PX4StableFirmware,    "http://px4-travis.s3.amazonaws.com/Firmware/stable/px4fmu-v1_default.px4" },
-        { PX4BetaFirmware,      "http://px4-travis.s3.amazonaws.com/Firmware/beta/px4fmu-v1_default.px4" },
-        { PX4DeveloperFirmware, "http://px4-travis.s3.amazonaws.com/Firmware/master/px4fmu-v1_default.px4" },
-    };
-    static const size_t crgPX4FMUV1Firmware = sizeof(rgPX4FMUV1Firmware) / sizeof(rgPX4FMUV1Firmware[0]);
-    
-    static const DownloadLocationByFirmwareType_t rgPX4FlowFirmware[] = {
-        { PX4StableFirmware, "http://px4-travis.s3.amazonaws.com/Flow/master/px4flow.px4" },
-    };
-    static const size_t crgPX4FlowFirmware = sizeof(rgPX4FlowFirmware) / sizeof(rgPX4FlowFirmware[0]);
-    
-    static const DownloadLocationByFirmwareType_t rg3DRRadioFirmware[] = {
-        { PX4StableFirmware, "http://firmware.diydrones.com/SiK/stable/radio~hm_trp.ihx" },
-    };
-    static const size_t crg3DRRadioFirmware = sizeof(rg3DRRadioFirmware) / sizeof(rg3DRRadioFirmware[0]);
-    
-    // Select the firmware set based on board type
-    
-    const DownloadLocationByFirmwareType_t* prgFirmware;
-    size_t crgFirmware;
-    
-    switch (_bootloaderBoardID) {
-        case Bootloader::boardIDPX4FMUV1:
-            prgFirmware = rgPX4FMUV1Firmware;
-            crgFirmware = crgPX4FMUV1Firmware;
-            break;
-            
-        case Bootloader::boardIDPX4Flow:
-            prgFirmware = rgPX4FlowFirmware;
-            crgFirmware = crgPX4FlowFirmware;
-            break;
-            
-        case Bootloader::boardIDPX4FMUV2:
-            prgFirmware = rgPX4FMUV2Firmware;
-            crgFirmware = crgPX4FMUV2Firmware;
-            break;
-            
-        case Bootloader::boardIDAeroCore:
-            prgFirmware = rgAeroCoreFirmware;
-            crgFirmware = crgAeroCoreFirmware;
-            break;
-            
-        case Bootloader::boardID3DRRadio:
-            prgFirmware = rg3DRRadioFirmware;
-            crgFirmware = crg3DRRadioFirmware;
-            break;
-            
-        default:
-            prgFirmware = NULL;
-            break;
+    switch (boardId) {
+    case Bootloader::boardIDPX4FMUV1:
+        return &_rgPX4FMUV1Firmware;
+    case Bootloader::boardIDPX4Flow:
+        return &_rgPX4FLowFirmware;
+    case Bootloader::boardIDPX4FMUV2:
+        return &_rgPX4FMUV2Firmware;
+    case Bootloader::boardIDPX4FMUV4:
+        return &_rgPX4FMUV4Firmware;
+    case Bootloader::boardIDAeroCore:
+        return &_rgAeroCoreFirmware;
+    case Bootloader::boardIDAUAVX2_1:
+        return &_rgAUAVX2_1Firmware;
+    case Bootloader::boardIDMINDPXFMUV2:
+        return &_rgMindPXFMUV2Firmware;
+    case Bootloader::boardIDTAPV1:
+        return &_rgTAPV1Firmware;
+    case Bootloader::boardIDASCV1:
+        return &_rgASCV1Firmware;
+    case Bootloader::boardID3DRRadio:
+        return &_rg3DRRadioFirmware;
+    default:
+        return NULL;
     }
+}
+
+/// @brief Prompts the user to select a firmware file if needed and moves the state machine to the next state.
+void FirmwareUpgradeController::_getFirmwareFile(FirmwareIdentifier firmwareId)
+{
+    QHash<FirmwareIdentifier, QString>* prgFirmware = _firmwareHashForBoardId(_bootloaderBoardID);
     
-    if (prgFirmware == NULL && firmwareType != PX4CustomFirmware) {
+    if (!prgFirmware && firmwareId.firmwareType != CustomFirmware) {
         _errorCancel("Attempting to flash an unknown board type, you must select 'Custom firmware file'");
         return;
     }
     
-    if (firmwareType == PX4CustomFirmware) {
-        _firmwareFilename = QGCFileDialog::getOpenFileName(NULL,                                                                // Parent to main window
+    if (firmwareId.firmwareType == CustomFirmware) {
+        _firmwareFilename = QGCQFileDialog::getOpenFileName(NULL,                                                                // Parent to main window
                                                            "Select Firmware File",                                              // Dialog Caption
                                                            QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation), // Initial directory
                                                            "Firmware Files (*.px4 *.bin *.ihx)");                               // File filter
     } else {
-        bool found = false;
-        
-        for (size_t i=0; i<crgFirmware; i++) {
-            if (prgFirmware->firmwareType == firmwareType) {
-                found = true;
-                break;
-            }
-            prgFirmware++;
-        }
-        
-        if (found) {
-            _firmwareFilename = prgFirmware->downloadLocation;
+        if (prgFirmware->contains(firmwareId)) {
+            _firmwareFilename = prgFirmware->value(firmwareId);
         } else {
             _errorCancel("Unable to find specified firmware download location");
             return;
@@ -283,48 +470,15 @@ void FirmwareUpgradeController::_downloadFirmware(void)
     _appendStatusLog("Downloading firmware...");
     _appendStatusLog(QString(" From: %1").arg(_firmwareFilename));
     
-    // Split out filename from path
-    QString firmwareFilename = QFileInfo(_firmwareFilename).fileName();
-    Q_ASSERT(!firmwareFilename.isEmpty());
-    
-    // Determine location to download file to
-    QString downloadFile = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
-    if (downloadFile.isEmpty()) {
-        downloadFile = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
-        if (downloadFile.isEmpty()) {
-            _errorCancel("Unabled to find writable download location. Tried downloads and temp directory.");
-            return;
-        }
-    }
-    Q_ASSERT(!downloadFile.isEmpty());
-    downloadFile += "/"  + firmwareFilename;
-
-    QUrl firmwareUrl;
-    if (_firmwareFilename.startsWith("http:")) {
-        firmwareUrl.setUrl(_firmwareFilename);
-    } else {
-        firmwareUrl = QUrl::fromLocalFile(_firmwareFilename);
-    }
-    Q_ASSERT(firmwareUrl.isValid());
-    
-    QNetworkRequest networkRequest(firmwareUrl);
-    
-    // Store download file location in user attribute so we can retrieve when the download finishes
-    networkRequest.setAttribute(QNetworkRequest::User, downloadFile);
-    
-    _downloadManager = new QNetworkAccessManager(this);
-    Q_CHECK_PTR(_downloadManager);
-    _downloadNetworkReply = _downloadManager->get(networkRequest);
-    Q_ASSERT(_downloadNetworkReply);
-    connect(_downloadNetworkReply, &QNetworkReply::downloadProgress, this, &FirmwareUpgradeController::_downloadProgress);
-    connect(_downloadNetworkReply, &QNetworkReply::finished, this, &FirmwareUpgradeController::_downloadFinished);
-    // FIXME
-    //connect(_downloadNetworkReply, &QNetworkReply::error, this, &FirmwareUpgradeController::_downloadError);
-    connect(_downloadNetworkReply, SIGNAL(error(QNetworkReply::NetworkError)), this, SLOT(_downloadError(QNetworkReply::NetworkError)));
+    QGCFileDownload* downloader = new QGCFileDownload(this);
+    connect(downloader, &QGCFileDownload::downloadFinished, this, &FirmwareUpgradeController::_firmwareDownloadFinished);
+    connect(downloader, &QGCFileDownload::downloadProgress, this, &FirmwareUpgradeController::_firmwareDownloadProgress);
+    connect(downloader, &QGCFileDownload::error,            this, &FirmwareUpgradeController::_firmwareDownloadError);
+    downloader->download(_firmwareFilename);
 }
 
 /// @brief Updates the progress indicator while downloading
-void FirmwareUpgradeController::_downloadProgress(qint64 curr, qint64 total)
+void FirmwareUpgradeController::_firmwareDownloadProgress(qint64 curr, qint64 total)
 {
     // Take care of cases where 0 / 0 is emitted as error return value
     if (total > 0) {
@@ -333,43 +487,18 @@ void FirmwareUpgradeController::_downloadProgress(qint64 curr, qint64 total)
 }
 
 /// @brief Called when the firmware download completes.
-void FirmwareUpgradeController::_downloadFinished(void)
+void FirmwareUpgradeController::_firmwareDownloadFinished(QString remoteFile, QString localFile)
 {
+    Q_UNUSED(remoteFile);
+
     _appendStatusLog("Download complete");
     
-    QNetworkReply* reply = qobject_cast<QNetworkReply*>(QObject::sender());
-    Q_ASSERT(reply);
-    
-    Q_ASSERT(_downloadNetworkReply == reply);
-    
-    _downloadManager->deleteLater();
-    _downloadManager = NULL;
-    
-    // When an error occurs or the user cancels the download, we still end up here. So bail out in
-    // those cases.
-    if (reply->error() != QNetworkReply::NoError) {
-        return;
-    }
-    
-    // Download file location is in user attribute
-    QString downloadFilename = reply->request().attribute(QNetworkRequest::User).toString();
-    Q_ASSERT(!downloadFilename.isEmpty());
-    
-    // Store downloaded file in download location
-    QFile file(downloadFilename);
-    if (!file.open(QIODevice::WriteOnly)) {
-        _errorCancel(QString("Could not save downloaded file to %1. Error: %2").arg(downloadFilename).arg(file.errorString()));
-        return;
-    }
-    
-    file.write(reply->readAll());
-    file.close();
     FirmwareImage* image = new FirmwareImage(this);
     
     connect(image, &FirmwareImage::statusMessage, this, &FirmwareUpgradeController::_status);
     connect(image, &FirmwareImage::errorMessage, this, &FirmwareUpgradeController::_error);
     
-    if (!image->load(downloadFilename, _bootloaderBoardID)) {
+    if (!image->load(localFile, _bootloaderBoardID)) {
         _errorCancel("Image load failed");
         return;
     }
@@ -389,16 +518,24 @@ void FirmwareUpgradeController::_downloadFinished(void)
 }
 
 /// @brief Called when an error occurs during download
-void FirmwareUpgradeController::_downloadError(QNetworkReply::NetworkError code)
+void FirmwareUpgradeController::_firmwareDownloadError(QString errorMsg)
 {
-    QString errorMsg;
-    
-    if (code == QNetworkReply::OperationCanceledError) {
-        errorMsg = "Download cancelled";
-    } else {
-        errorMsg = QString("Error during download. Error: %1").arg(code);
-    }
     _errorCancel(errorMsg);
+}
+
+/// @brief returns firmware type as a string
+QString FirmwareUpgradeController::firmwareTypeAsString(FirmwareType_t type) const
+{
+    switch (type) {
+    case StableFirmware:
+        return "stable";
+    case DeveloperFirmware:
+        return "developer";
+    case BetaFirmware:
+        return "beta";
+    default:
+        return "custom";
+    }
 }
 
 /// @brief Signals completion of one of the specified bootloader commands. Moves the state machine to the
@@ -411,6 +548,7 @@ void FirmwareUpgradeController::_flashComplete(void)
     _appendStatusLog("Upgrade complete", true);
     _appendStatusLog("------------------------------------------", false);
     emit flashComplete();
+    qgcApp()->toolbox()->linkManager()->setConnectionsAllowed();
 }
 
 void FirmwareUpgradeController::_error(const QString& errorString)
@@ -462,17 +600,6 @@ void FirmwareUpgradeController::_appendStatusLog(const QString& text, bool criti
                               Q_ARG(QVariant, varText));
 }
 
-bool FirmwareUpgradeController::qgcConnections(void)
-{
-    return LinkManager::instance()->anyConnectedLinks();
-}
-
-void FirmwareUpgradeController::_linkDisconnected(LinkInterface* link)
-{
-    Q_UNUSED(link);
-    emit qgcConnectionsChanged(qgcConnections());
-}
-
 void FirmwareUpgradeController::_errorCancel(const QString& msg)
 {
     _appendStatusLog(msg, false);
@@ -480,6 +607,7 @@ void FirmwareUpgradeController::_errorCancel(const QString& msg)
     _appendStatusLog("------------------------------------------", false);
     emit error();
     cancel();
+    qgcApp()->toolbox()->linkManager()->setConnectionsAllowed();
 }
 
 void FirmwareUpgradeController::_eraseStarted(void)
@@ -492,4 +620,195 @@ void FirmwareUpgradeController::_eraseStarted(void)
 void FirmwareUpgradeController::_eraseComplete(void)
 {
     _eraseTimer.stop();
+}
+
+void FirmwareUpgradeController::_loadAPMVersions(uint32_t bootloaderBoardID)
+{
+    _apmVersionMap.clear();
+
+    QHash<FirmwareIdentifier, QString>* prgFirmware = _firmwareHashForBoardId(bootloaderBoardID);
+
+    foreach (FirmwareIdentifier firmwareId, prgFirmware->keys()) {
+        if (firmwareId.autopilotStackType == AutoPilotStackAPM) {
+            QString versionFile = QFileInfo(prgFirmware->value(firmwareId)).path() + "/git-version.txt";
+
+            qCDebug(FirmwareUpgradeLog) << "Downloading" << versionFile;
+            QGCFileDownload* downloader = new QGCFileDownload(this);
+            connect(downloader, &QGCFileDownload::downloadFinished, this, &FirmwareUpgradeController::_apmVersionDownloadFinished);
+            downloader->download(versionFile);
+        }
+    }
+}
+
+void FirmwareUpgradeController::_apmVersionDownloadFinished(QString remoteFile, QString localFile)
+{
+    qCDebug(FirmwareUpgradeLog) << "Download complete" << remoteFile << localFile;
+
+    // Now read the version file and pull out the version string
+
+    QFile versionFile(localFile);
+    versionFile.open(QIODevice::ReadOnly | QIODevice::Text);
+    QTextStream stream(&versionFile);
+    QString versionContents = stream.readAll();
+
+    QString version;
+    QRegularExpression re("APMVERSION: (.*)$");
+    QRegularExpressionMatch match = re.match(versionContents);
+    if (match.hasMatch()) {
+        version = match.captured(1);
+    }
+
+    if (version.isEmpty()) {
+        qWarning() << "Unable to parse version info from file" << remoteFile;
+        return;
+    }
+
+    // In order to determine the firmware and vehicle type for this file we find the matching entry in the firmware list
+
+    QHash<FirmwareIdentifier, QString>* prgFirmware = _firmwareHashForBoardId(_bootloaderBoardID);
+
+    QString remotePath = QFileInfo(remoteFile).path();
+    foreach (FirmwareIdentifier firmwareId, prgFirmware->keys()) {
+        if (remotePath == QFileInfo((*prgFirmware)[firmwareId]).path()) {
+            qCDebug(FirmwareUpgradeLog) << "Adding version to map, version:firwmareType:vehicleType" << version << firmwareId.firmwareType << firmwareId.firmwareVehicleType;
+            _apmVersionMap[firmwareId.firmwareType][firmwareId.firmwareVehicleType] = version;
+        }
+    }
+
+    emit apmAvailableVersionsChanged();
+}
+
+void FirmwareUpgradeController::setSelectedFirmwareType(FirmwareType_t firmwareType)
+{
+    _selectedFirmwareType = firmwareType;
+    emit selectedFirmwareTypeChanged(_selectedFirmwareType);
+    emit apmAvailableVersionsChanged();
+}
+
+QStringList FirmwareUpgradeController::apmAvailableVersions(void)
+{
+    QStringList list;
+
+    _apmVehicleTypeFromCurrentVersionList.clear();
+
+    foreach (FirmwareVehicleType_t vehicleType, _apmVersionMap[_selectedFirmwareType].keys()) {
+        QString version;
+
+        switch (vehicleType) {
+        case QuadFirmware:
+            version = "Quad - ";
+            break;
+        case X8Firmware:
+            version = "X8 - ";
+            break;
+        case HexaFirmware:
+            version = "Hexa - ";
+            break;
+        case OctoFirmware:
+            version = "Octo - ";
+            break;
+        case YFirmware:
+            version = "Y - ";
+            break;
+        case Y6Firmware:
+            version = "Y6 - ";
+            break;
+        case HeliFirmware:
+            version = "Heli - ";
+            break;
+        case CopterFirmware:
+            version = "MultiRotor - ";
+            break;
+        case SubFirmware:
+            version = "Sub - ";
+            break;
+        case PlaneFirmware:
+        case RoverFirmware:
+        case DefaultVehicleFirmware:
+            break;
+        }
+
+        version += _apmVersionMap[_selectedFirmwareType][vehicleType];
+        _apmVehicleTypeFromCurrentVersionList.append(vehicleType);
+
+        list << version;
+    }
+
+    return list;
+}
+
+FirmwareUpgradeController::FirmwareVehicleType_t FirmwareUpgradeController::vehicleTypeFromVersionIndex(int index)
+{
+    if (index < 0 || index >= _apmVehicleTypeFromCurrentVersionList.count()) {
+        qWarning() << "Invalid index, index:count" << index << _apmVehicleTypeFromCurrentVersionList.count();
+        return QuadFirmware;
+    }
+
+    return _apmVehicleTypeFromCurrentVersionList[index];
+}
+
+void FirmwareUpgradeController::_determinePX4StableVersion(void)
+{
+    QGCFileDownload* downloader = new QGCFileDownload(this);
+    connect(downloader, &QGCFileDownload::downloadFinished, this, &FirmwareUpgradeController::_px4ReleasesGithubDownloadFinished);
+    connect(downloader, &QGCFileDownload::error, this, &FirmwareUpgradeController::_px4ReleasesGithubDownloadError);
+    downloader->download(QStringLiteral("https://api.github.com/repos/PX4/Firmware/releases"));
+}
+
+void FirmwareUpgradeController::_px4ReleasesGithubDownloadFinished(QString remoteFile, QString localFile)
+{
+    Q_UNUSED(remoteFile);
+
+    QFile jsonFile(localFile);
+    if (!jsonFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        qCWarning(FirmwareUpgradeLog) << "Unable to open github px4 releases json file" << localFile << jsonFile.errorString();
+        return;
+    }
+    QByteArray bytes = jsonFile.readAll();
+    jsonFile.close();
+
+    QJsonParseError jsonParseError;
+    QJsonDocument doc = QJsonDocument::fromJson(bytes, &jsonParseError);
+    if (jsonParseError.error != QJsonParseError::NoError) {
+        qCWarning(FirmwareUpgradeLog) <<  "Unable to open px4 releases json document" << localFile << jsonParseError.errorString();
+        return;
+    }
+
+    // Json should be an array of release objects
+    if (!doc.isArray()) {
+        qCWarning(FirmwareUpgradeLog) <<  "px4 releases json document is not an array" << localFile;
+        return;
+    }
+    QJsonArray releases = doc.array();
+
+    // The first release marked prerelease=false is stable
+    // The first release marked prerelease=true is beta
+    bool foundStable = false;
+    bool foundBeta = false;
+    for (int i=0; i<releases.count() && (!foundStable || !foundBeta); i++) {
+        QJsonObject release = releases[i].toObject();
+        if (!foundStable && !release["prerelease"].toBool()) {
+            _px4StableVersion = release["name"].toString();
+            emit px4StableVersionChanged(_px4StableVersion);
+            qCDebug(FirmwareUpgradeLog()) << "Found px4 stable version" << _px4StableVersion;
+            foundStable = true;
+        } else if (!foundBeta && release["prerelease"].toBool()) {
+            _px4BetaVersion = release["name"].toString();
+            emit px4StableVersionChanged(_px4BetaVersion);
+            qCDebug(FirmwareUpgradeLog()) << "Found px4 beta version" << _px4BetaVersion;
+            foundBeta = true;
+        }
+    }
+
+    if (!foundStable) {
+        qCDebug(FirmwareUpgradeLog()) << "Unable to find px4 stable version" << localFile;
+    }
+    if (!foundBeta) {
+        qCDebug(FirmwareUpgradeLog()) << "Unable to find px4 beta version" << localFile;
+    }
+}
+
+void FirmwareUpgradeController::_px4ReleasesGithubDownloadError(QString errorMsg)
+{
+    qCWarning(FirmwareUpgradeLog) << "PX4 releases github download failed" << errorMsg;
 }

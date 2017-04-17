@@ -1,25 +1,12 @@
-/*=====================================================================
- 
- QGroundControl Open Source Ground Control Station
- 
- (c) 2009 - 2015 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
- 
- This file is part of the QGROUNDCONTROL project
- 
- QGROUNDCONTROL is free software: you can redistribute it and/or modify
- it under the terms of the GNU General Public License as published by
- the Free Software Foundation, either version 3 of the License, or
- (at your option) any later version.
- 
- QGROUNDCONTROL is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU General Public License for more details.
- 
- You should have received a copy of the GNU General Public License
- along with QGROUNDCONTROL. If not, see <http://www.gnu.org/licenses/>.
- 
- ======================================================================*/
+/****************************************************************************
+ *
+ *   (c) 2009-2016 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
+ *
+ * QGroundControl is licensed according to the terms in the file
+ * COPYING.md in the root of the source code directory.
+ *
+ ****************************************************************************/
+
 
 /// @file
 ///     @brief TCP link type for SITL support
@@ -46,13 +33,18 @@
 
 //#define TCPLINK_READWRITE_DEBUG   // Use to debug data reads/writes
 
-class TCPLinkUnitTest;
+class TCPLinkTest;
 
 #define QGC_TCP_PORT 5760
 
 class TCPConfiguration : public LinkConfiguration
 {
+    Q_OBJECT
+
 public:
+
+    Q_PROPERTY(quint16  port    READ port   WRITE setPort   NOTIFY portChanged)
+    Q_PROPERTY(QString  host    READ host   WRITE setHost   NOTIFY hostChanged)
 
     /*!
      * @brief Regular constructor
@@ -92,6 +84,7 @@ public:
      * @return Host address
      */
     const QHostAddress& address   () { return _address; }
+    const QString       host      () { return _address.toString(); }
 
     /*!
      * @brief Set the host address
@@ -99,13 +92,19 @@ public:
      * @param[in] address Host address
      */
     void setAddress (const QHostAddress& address);
+    void setHost    (const QString host);
 
     /// From LinkConfiguration
-    int  type() { return LinkConfiguration::TypeTcp; }
-    void copyFrom(LinkConfiguration* source);
-    void loadSettings(QSettings& settings, const QString& root);
-    void saveSettings(QSettings& settings, const QString& root);
-    void updateSettings();
+    LinkType    type            () { return LinkConfiguration::TypeTcp; }
+    void        copyFrom        (LinkConfiguration* source);
+    void        loadSettings    (QSettings& settings, const QString& root);
+    void        saveSettings    (QSettings& settings, const QString& root);
+    void        updateSettings  ();
+    QString     settingsURL     () { return "TcpSettings.qml"; }
+
+signals:
+    void portChanged();
+    void hostChanged();
 
 private:
     QHostAddress _address;
@@ -115,14 +114,14 @@ private:
 class TCPLink : public LinkInterface
 {
     Q_OBJECT
-    
-    friend class TCPLinkUnitTest;
+
+    friend class TCPLinkTest;
     friend class TCPConfiguration;
     friend class LinkManager;
-    
+
 public:
     QTcpSocket* getSocket(void) { return _socket; }
-    
+
     void signalBytesWritten(void);
 
     // LinkInterface methods
@@ -134,16 +133,17 @@ public:
     qint64 getConnectionSpeed() const;
     qint64 getCurrentInDataRate() const;
     qint64 getCurrentOutDataRate() const;
-    
+
     // These are left unimplemented in order to cause linker errors which indicate incorrect usage of
     // connect/disconnect on link directly. All connect/disconnect calls should be made through LinkManager.
     bool connect(void);
     bool disconnect(void);
-    
-public slots:
-    
+
+private slots:
     // From LinkInterface
-    void writeBytes(const char* data, qint64 length);
+    void _writeBytes(const QByteArray data);
+
+public slots:
     void waitForBytesWritten(int msecs);
     void waitForReadyRead(int msecs);
 
@@ -156,27 +156,27 @@ protected slots:
 protected:
     // From LinkInterface->QThread
     virtual void run(void);
-    
+
 private:
     // Links are only created/destroyed by LinkManager so constructor/destructor is not public
-    TCPLink(TCPConfiguration* config);
+    TCPLink(SharedLinkConfigurationPointer& config);
     ~TCPLink();
-    
+
     // From LinkInterface
     virtual bool _connect(void);
-    virtual bool _disconnect(void);
+    virtual void _disconnect(void);
 
     bool _hardwareConnect();
     void _restartConnection();
 
 #ifdef TCPLINK_READWRITE_DEBUG
-    void _writeDebugBytes(const char *data, qint16 size);
+    void _writeDebugBytes(const QByteArray data);
 #endif
 
-    TCPConfiguration* _config;
+    TCPConfiguration* _tcpConfig;
     QTcpSocket*       _socket;
     bool              _socketIsConnected;
-    
+
     quint64 _bitsSentTotal;
     quint64 _bitsSentCurrent;
     quint64 _bitsSentMax;

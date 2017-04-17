@@ -1,32 +1,17 @@
-/*=====================================================================
- 
- QGroundControl Open Source Ground Control Station
- 
- (c) 2009 - 2014 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
- 
- This file is part of the QGROUNDCONTROL project
- 
- QGROUNDCONTROL is free software: you can redistribute it and/or modify
- it under the terms of the GNU General Public License as published by
- the Free Software Foundation, either version 3 of the License, or
- (at your option) any later version.
- 
- QGROUNDCONTROL is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU General Public License for more details.
- 
- You should have received a copy of the GNU General Public License
- along with QGROUNDCONTROL. If not, see <http://www.gnu.org/licenses/>.
- 
- ======================================================================*/
+/****************************************************************************
+ *
+ *   (c) 2009-2016 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
+ *
+ * QGroundControl is licensed according to the terms in the file
+ * COPYING.md in the root of the source code directory.
+ *
+ ****************************************************************************/
+
 
 #ifndef GENERICAUTOPILOT_H
 #define GENERICAUTOPILOT_H
 
 #include "AutoPilotPlugin.h"
-#include "AutoPilotPluginManager.h"
-#include "GenericParameterFacts.h"
 
 /// @file
 ///     @brief This is the generic implementation of the AutoPilotPlugin class for mavs
@@ -38,24 +23,11 @@ class GenericAutoPilotPlugin : public AutoPilotPlugin
     Q_OBJECT
 
 public:
-    GenericAutoPilotPlugin(UASInterface* uas, QObject* parent = NULL);
+    GenericAutoPilotPlugin(Vehicle* vehicle, QObject* parent = NULL);
     
     // Overrides from AutoPilotPlugin
-    virtual const QVariantList& vehicleComponents(void);
-
-    static QList<AutoPilotPluginManager::FullMode_t> getModes(void);
-    static QString getAudioModeText(uint8_t baseMode, uint32_t customMode);
-    static QString getShortModeText(uint8_t baseMode, uint32_t customMode);
-    static void clearStaticData(void);
-    
-private slots:
-    void _parametersReady(void);
-    
-private:
-	// Overrides from AutoPilotPlugin
-	virtual ParameterLoader* _getParameterLoader(void) { return _parameterFacts; }
-	
-    GenericParameterFacts*  _parameterFacts;
+    const QVariantList& vehicleComponents(void) final;
+    QString prerequisiteSetup(VehicleComponent* component) const final;
 };
 
 #endif

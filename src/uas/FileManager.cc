@@ -1,30 +1,19 @@
-/*=====================================================================
+/****************************************************************************
+ *
+ *   (c) 2009-2016 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
+ *
+ * QGroundControl is licensed according to the terms in the file
+ * COPYING.md in the root of the source code directory.
+ *
+ ****************************************************************************/
 
- QGroundControl Open Source Ground Control Station
-
- (c) 2009 - 2014 QGROUNDCONTROL PROJECT <http://www.qgroundcontrol.org>
-
- This file is part of the QGROUNDCONTROL project
-
- QGROUNDCONTROL is free software: you can redistribute it and/or modify
- it under the terms of the GNU General Public License as published by
- the Free Software Foundation, either version 3 of the License, or
- (at your option) any later version.
-
- QGROUNDCONTROL is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU General Public License for more details.
-
- You should have received a copy of the GNU General Public License
- along with QGROUNDCONTROL. If not, see <http://www.gnu.org/licenses/>.
-
- ======================================================================*/
 
 #include "FileManager.h"
 #include "QGC.h"
 #include "MAVLinkProtocol.h"
 #include "MainWindow.h"
+#include "Vehicle.h"
+#include "QGCApplication.h"
 
 #include <QFile>
 #include <QDir>
@@ -32,17 +21,18 @@
 
 QGC_LOGGING_CATEGORY(FileManagerLog, "FileManagerLog")
 
-FileManager::FileManager(QObject* parent, UASInterface* uas) :
-    QObject(parent),
-    _currentOperation(kCOIdle),
-    _mav(uas),
-    _lastOutgoingSeqNumber(0),
-    _activeSession(0),
-    _systemIdQGC(0)
+FileManager::FileManager(QObject* parent, Vehicle* vehicle)
+    : QObject(parent)
+    , _currentOperation(kCOIdle)
+    , _vehicle(vehicle)
+    , _dedicatedLink(NULL)
+    , _lastOutgoingSeqNumber(0)
+    , _activeSession(0)
+    , _systemIdQGC(0)
 {
     connect(&_ackTimer, &QTimer::timeout, this, &FileManager::_ackTimeout);
     
-    _systemIdServer = _mav->getUASID();
+    _systemIdServer = _vehicle->id();
     
     // Make sure we don't have bad structure packing
     Q_ASSERT(sizeof(RequestHeader) == 12);
@@ -306,10 +296,8 @@ void FileManager::_writeFileDatablock(void)
     _sendRequest(&request);
 }
 
-void FileManager::receiveMessage(LinkInterface* link, mavlink_message_t message)
+void FileManager::receiveMessage(mavlink_message_t message)
 {
-    Q_UNUSED(link);
-
     // receiveMessage is signalled will all mavlink messages so we need to filter everything else out but ours.
     if (message.msgid != MAVLINK_MSG_ID_FILE_TRANSFER_PROTOCOL) {
         return;
@@ -442,6 +430,12 @@ void FileManager::listDirectory(const QString& dirPath)
         return;
     }
 
+    _dedicatedLink = _vehicle->priorityLink();
+    if (!_dedicatedLink) {
+        _emitErrorMessage(tr("Command not sent. No Vehicle links."));
+        return;
+    }
+
     // initialise the lister
     _listPath = dirPath;
     _listOffset = 0;
@@ -479,6 +473,12 @@ void FileManager::downloadPath(const QString& from, const QDir& downloadDir)
         _emitErrorMessage(tr("Command not sent. Waiting for previous command to complete."));
         return;
     }
+
+    _dedicatedLink = _vehicle->priorityLink();
+    if (!_dedicatedLink) {
+        _emitErrorMessage(tr("Command not sent. No Vehicle links."));
+        return;
+    }
     
 	qCDebug(FileManagerLog) << "downloadPath from:" << from << "to:" << downloadDir;
 	_downloadWorker(from, downloadDir, true /* read file */);
@@ -488,6 +488,12 @@ void FileManager::streamPath(const QString& from, const QDir& downloadDir)
 {
     if (_currentOperation != kCOIdle) {
         _emitErrorMessage(tr("Command not sent. Waiting for previous command to complete."));
+        return;
+    }
+
+    _dedicatedLink = _vehicle->priorityLink();
+    if (!_dedicatedLink) {
+        _emitErrorMessage(tr("Command not sent. No Vehicle links."));
         return;
     }
     
@@ -532,6 +538,12 @@ void FileManager::uploadPath(const QString& toPath, const QFileInfo& uploadFile)
 {
     if(_currentOperation != kCOIdle){
         _emitErrorMessage(tr("UAS File manager busy.  Try again later"));
+        return;
+    }
+
+    _dedicatedLink = _vehicle->priorityLink();
+    if (!_dedicatedLink) {
+        _emitErrorMessage(tr("Command not sent. No Vehicle links."));
         return;
     }
 
@@ -589,7 +601,7 @@ QString FileManager::errorString(uint8_t errorCode)
         case kErrInvalidSession:
             return QString("invalid session");
         case kErrNoSessionsAvailable:
-            return QString("no sessions availble");
+            return QString("no sessions available");
         case kErrFailFileExists:
             return QString("File already exists on target");
         case kErrFailFileProtected:
@@ -717,17 +729,25 @@ void FileManager::_sendRequest(Request* request)
     qCDebug(FileManagerLog) << "_sendRequest opcode:" << request->hdr.opcode << "seqNumber:" << request->hdr.seqNumber;
     
     if (_systemIdQGC == 0) {
-        _systemIdQGC = MAVLinkProtocol::instance()->getSystemId();
+        _systemIdQGC = qgcApp()->toolbox()->mavlinkProtocol()->getSystemId();
+    }
+
+    // Unit testing code can end up here without _dedicateLink set since it tests inidividual commands.
+    LinkInterface* link;
+    if (_dedicatedLink) {
+        link = _dedicatedLink;
+    } else {
+        link = _vehicle->priorityLink();
     }
     
-    Q_ASSERT(_mav);
-    mavlink_msg_file_transfer_protocol_pack(_systemIdQGC,       // QGC System ID
-                                            0,                  // QGC Component ID
-                                            &message,           // Mavlink Message to pack into
-                                            0,                  // Target network
-                                            _systemIdServer,    // Target system
-                                            0,                  // Target component
-                                            (uint8_t*)request); // Payload
+    mavlink_msg_file_transfer_protocol_pack_chan(_systemIdQGC,       // QGC System ID
+                                                 0,                  // QGC Component ID
+                                                 link->mavlinkChannel(),
+                                                 &message,           // Mavlink Message to pack into
+                                                 0,                  // Target network
+                                                 _systemIdServer,    // Target system
+                                                 0,                  // Target component
+                                                 (uint8_t*)request); // Payload
     
-    _mav->sendMessage(message);
+    _vehicle->sendMessageOnLink(link, message);
 }
